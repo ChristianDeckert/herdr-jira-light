@@ -1,0 +1,29 @@
+{
+  "startAt": 0,
+  "maxResults": 50,
+  "total": 2,
+  "issues": [
+    {
+      "key": "GB-101",
+      "fields": {
+        "summary": "Crash on login\twith tab",
+        "status": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
+        "issuetype": { "name": "Bug" },
+        "priority": { "name": "High" },
+        "assignee": { "displayName": "Ann Example", "name": "aexample" },
+        "updated": "2026-10-26T10:02:00.000+0100"
+      }
+    },
+    {
+      "key": "GB-99",
+      "fields": {
+        "summary": "Wishlist",
+        "status": { "name": "To Do", "statusCategory": { "key": "new" } },
+        "issuetype": { "name": "Story" },
+        "priority": null,
+        "assignee": null,
+        "updated": "2026-10-20T08:00:00.000+0200"
+      }
+    }
+  ]
+}

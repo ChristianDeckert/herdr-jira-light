@@ -1,0 +1,9 @@
+{
+  "maxResults": 50,
+  "isLast": true,
+  "values": [
+    { "id": 101, "state": "active", "name": "Shop Sprint 12" },
+    { "id": 102, "state": "future", "name": "Next" },
+    { "id": 103, "state": "future", "name": "Ideas" }
+  ]
+}

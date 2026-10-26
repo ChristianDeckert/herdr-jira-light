@@ -1,0 +1,362 @@
+# Jira helpers: context matching, JQL sorting, text helpers, and background fetches into a file cache.
+zmodload zsh/datetime
+zmodload -F zsh/stat b:zstat
+JL_US=$'\x1f'
+
+# Index of the context whose path is DIR or the deepest parent of it; 0 = the global filters.
+jl_match_context() { # dir -> REPLY
+  local d=${1:A} p i best=0 blen=-1
+  for (( i = 1; i <= ${#CTX_PATH}; i++ )); do
+    p=$CTX_PATH[i]
+    if [[ $d == "$p" || $d == "$p"/* ]] && (( ${#p} > blen )); then best=$i blen=${#p}; fi
+  done
+  REPLY=$best
+}
+
+# Indices into FLT_* shown for a context: its own filters, then (JIRA_INHERIT_GLOBAL) the global ones.
+jl_filters_for() { # ctx -> JL_FILTERS
+  local i
+  JL_FILTERS=()
+  for (( i = 1; i <= ${#FLT_NAME}; i++ )); do (( FLT_CTX[i] == $1 )) && JL_FILTERS+=($i); done
+  (( $1 && JIRA_INHERIT_GLOBAL )) || return 0
+  for (( i = 1; i <= ${#FLT_NAME}; i++ )); do (( FLT_CTX[i] == 0 )) && JL_FILTERS+=($i); done
+}
+
+JL_SORTS=(filter updated created priority rank key status)
+typeset -gA JL_SORT_DIR=(updated DESC created DESC priority DESC rank ASC key DESC status ASC)
+
+jl_strip_order() { # jql -> REPLY
+  setopt local_options extended_glob
+  local j=$1
+  if [[ $j =~ '(^|[[:space:]])[Oo][Rr][Dd][Ee][Rr][[:space:]]+[Bb][Yy]([[:space:]].*)?$' ]]; then
+    j=${j[1,MBEGIN-1]}
+  fi
+  REPLY=${j%%[[:space:]]#}
+}
+
+# The filter's JQL with its ORDER BY replaced by the sort mode; "filter" keeps the filter's own order.
+jl_sorted_jql() { # jql mode reverse(0|1) -> REPLY
+  if [[ $2 == filter ]]; then REPLY=$1; return; fi
+  local dir=${JL_SORT_DIR[$2]:-DESC}
+  (( $3 )) && { [[ $dir == DESC ]] && dir=ASC || dir=DESC }
+  jl_strip_order "$1"
+  REPLY="${REPLY:+$REPLY }ORDER BY $2 $dir"
+}
+
+jl_slug() { # text -> REPLY
+  setopt local_options extended_glob
+  local s=${(L)1}
+  s=${s//ä/ae} s=${s//ö/oe} s=${s//ü/ue} s=${s//ß/ss}
+  s=${s//[^a-z0-9]##/-}
+  s=${s##-##} s=${s%%-##}
+  s=${s[1,40]}
+  REPLY=${s%%-##}
+}
+
+# Fills {key} {summary} {url} {status} {type} {priority} {assignee} {slug}; \n becomes a newline.
+jl_fill() { # template issue-assoc-name -> REPLY
+  local t=$1 f v
+  local -A iss=("${(@Pkv)2}")
+  jl_slug "$iss[summary]"; iss[slug]=$REPLY
+  for f in key summary url status type priority assignee slug; do
+    v=$iss[$f]
+    t=${t//\{$f\}/$v}
+  done
+  REPLY=${t//\\n/$'\n'}
+}
+
+# "3m", "5h", "2d", "6w" since a Jira timestamp (2026-10-26T14:46:03.000+0100).
+jl_age() { # timestamp -> REPLY
+  local s
+  jl_epoch "$1" || { REPLY="—"; return }
+  s=$(( EPOCHSECONDS - REPLY ))
+  (( s < 0 )) && s=0
+  if (( s < 3600 )); then REPLY="$(( s / 60 ))m"
+  elif (( s < 86400 )); then REPLY="$(( s / 3600 ))h"
+  elif (( s < 86400 * 14 )); then REPLY="$(( s / 86400 ))d"
+  elif (( s < 86400 * 365 )); then REPLY="$(( s / 604800 ))w"
+  else REPLY="$(( s / (86400 * 365) ))y"
+  fi
+}
+
+# Word-wraps text to a width; long words are cut. Blank lines are kept.
+jl_wrap() { # width text -> WRAPPED
+  local w=$1 para word cur
+  WRAPPED=()
+  (( w < 10 )) && w=10
+  for para in "${(@f)2}"; do
+    para=${para//$'\r'/}
+    if [[ -z ${para// /} ]]; then WRAPPED+=(""); continue; fi
+    cur=""
+    for word in ${=para}; do
+      while (( ${#word} > w )); do
+        [[ -n $cur ]] && { WRAPPED+=("$cur"); cur="" }
+        WRAPPED+=("${word[1,w]}"); word=${word[w+1,-1]}
+      done
+      if [[ -z $cur ]]; then cur=$word
+      elif (( ${#cur} + 1 + ${#word} <= w )); then cur+=" $word"
+      else WRAPPED+=("$cur"); cur=$word
+      fi
+    done
+    [[ -n $cur ]] && WRAPPED+=("$cur")
+  done
+}
+
+# One line per issue, fields separated by \x1f: key status category type priority assignee updated summary.
+JL_ROWS_JQ='.issues[]? | [.key, (.fields.status.name // "?"), (.fields.status.statusCategory.key // ""),
+  (.fields.issuetype.name // ""), (.fields.priority.name // "—"),
+  (.fields.assignee.displayName // .fields.assignee.name // "—"), (.fields.updated // ""),
+  ((.fields.summary // "") | gsub("[\\t\\r\\n]"; " "))] | join("\u001f")'
+JL_SEARCH_FIELDS="summary,status,issuetype,priority,assignee,updated"
+
+jl_parse_rows() { # json-file -> ROWS (one \x1f-joined line per issue), ROWS_TOTAL
+  ROWS=(${(f)"$(jq -r "$JL_ROWS_JQ" "$1" 2>/dev/null)"})
+  ROWS_TOTAL=$(jq -r '.total // empty' "$1" 2>/dev/null)
+}
+
+# The issue as records for the details view, separated by \x1e, fields by \x1f. The first field names
+# the record: head, desc, time, field (label value), person (label name), sub, link, att, comment.
+# Custom fields are found by their display name (expand=names), so other instances' fields show too;
+# Server/DC sends a sprint as "...Sprint@1a2b[id=7,name=Sprint 5,...]".
+JL_RS=$'\x1e'
+JL_DETAIL_JQ='
+  def nm: if type == "object" then (.displayName // .name // .value // .key // "")
+    elif type == "string" then ((capture("Sprint@[^\\[]*\\[.*name=(?<n>[^,\\]]*)") | .n) // .)
+    elif type == "number" or type == "boolean" then tostring else "" end;
+  def val: if type == "array" then (map(nm) | map(select(. != "")) | join(", ")) else nm end;
+  def user: type == "object" and (has("emailAddress") or has("avatarUrls"));
+  def status: [(.fields.status.name // ""), (.fields.status.statusCategory.key // "")];
+  . as $i | ($i.fields // {}) as $f | ($i.names // {}) as $n
+  | [ ["head", $i.key, ($f.issuetype.name // ""), ($f.status.name // ""), ($f.status.statusCategory.key // ""),
+       ($f.priority.name // ""), ($f.resolution.name // ""), ($f.summary // ""), ($f.project.name // ""),
+       ($f.created // ""), ($f.updated // ""), ($f.duedate // ""), ($f.resolutiondate // ""),
+       ($f.watches.watchCount // 0), ($f.parent.key // ""), ($f.parent.fields.summary // "")],
+      ["desc", (if ($f.description | type) == "string" then $f.description else "" end)],
+      ["time", ($f.timeoriginalestimate // 0), ($f.timespent // 0), ($f.timeestimate // 0)],
+      ["field", "Fix versions", ($f.fixVersions // [] | val)],
+      ["field", "Affects versions", ($f.versions // [] | val)],
+      ["field", "Components", ($f.components // [] | val)],
+      ["field", "Labels", ($f.labels // [] | val)],
+      ["person", "Assignee", (if $f.assignee then ($f.assignee | nm) else "Unassigned" end)],
+      ["person", "Reporter", ($f.reporter // {} | nm)] ]
+    + [ $f | to_entries[] | select((.key | startswith("customfield_")) and .value != null)
+        | ($n[.key] // .key) as $name
+        | select($name | test("^(Rank|Development|Σ)") | not)
+        | if (.value | user) then ["person", $name, (.value | nm)] else ["field", $name, (.value | val)] end ]
+    + [ $f.subtasks // [] | .[] | ["sub", .key] + status + [(.fields.summary // "")] ]
+    + [ $f.issuelinks // [] | .[]
+        | (if .outwardIssue then [(.type.outward // ""), .outwardIssue] else [(.type.inward // ""), .inwardIssue] end) as [$rel, $o]
+        | ["link", $rel, $o.key] + ($o | status) + [($o.fields.summary // "")] ]
+    + [ $f.attachment // [] | .[] | ["att", .filename, (.size // 0), (.author.displayName // ""), (.created // ""), (.content // "")] ]
+    + [ $f.comment.comments // [] | reverse | .[] | ["comment", (.author.displayName // .author.name // ""), (.created // ""), (.body // "")] ]
+  | map(select(.[0] != "field" and .[0] != "person" or .[2] != ""))
+  | map(map(tostring | gsub("[\u001e\u001f]"; " ")) | join("\u001f")) | join("\u001e")'
+
+# DETAIL gets the head, description and time tracking by name; DREC keeps the other records in order.
+jl_parse_detail() { # json-file -> assoc DETAIL, DREC
+  local raw rec
+  local -a f
+  DETAIL=() DREC=()
+  raw=$(jq -r "$JL_DETAIL_JQ" "$1" 2>/dev/null) || return 1
+  for rec in "${(@ps:$JL_RS:)raw}"; do
+    f=("${(@ps:$JL_US:)rec}")
+    case $f[1] in
+      head) DETAIL+=(key "$f[2]" type "$f[3]" status "$f[4]" category "$f[5]" priority "$f[6]"
+              resolution "$f[7]" summary "$f[8]" project "$f[9]" created "$f[10]" updated "$f[11]"
+              due "$f[12]" resolved "$f[13]" watchers "$f[14]" parent "$f[15]" parent_summary "$f[16]") ;;
+      desc) DETAIL[description]=$f[2] ;;
+      time) DETAIL+=(estimate "$f[2]" spent "$f[3]" remaining "$f[4]") ;;
+      *) DREC+=("$rec") ;;
+    esac
+  done
+}
+
+jl_epoch() { # Jira timestamp or date -> REPLY epoch seconds
+  setopt local_options extended_glob
+  local ts=$1 then off
+  REPLY=""
+  [[ $ts == [0-9](#c4)-[0-9][0-9]-[0-9][0-9] ]] && ts+="T00:00:00"
+  [[ $ts =~ '^([0-9-]+T[0-9:]+)[.0-9]*([+-][0-9]{4}|Z)?$' ]] || return 1
+  local base=$match[1] tz=$match[2]
+  TZ=UTC strftime -r -s then '%Y-%m-%dT%H:%M:%S' "$base" 2>/dev/null || return 1
+  if [[ $tz == [+-]* ]]; then
+    off=$(( 10#${tz[2,3]} * 3600 + 10#${tz[4,5]} * 60 ))
+    [[ $tz == +* ]] && (( then -= off )) || (( then += off ))
+  fi
+  REPLY=$then
+}
+
+jl_duration() { # seconds -> REPLY like "2h 15m"
+  local s=$1 h m
+  (( h = s / 3600, m = s % 3600 / 60 ))
+  if (( h && m )); then REPLY="${h}h ${m}m"
+  elif (( h )); then REPLY="${h}h"
+  else REPLY="${m}m"
+  fi
+}
+
+jl_size() { # bytes -> REPLY like "1.2 MB"
+  if (( $1 >= 1048576 )); then REPLY="$(printf '%.1f' $(( $1 / 1048576.0 ))) MB"
+  elif (( $1 >= 1024 )); then REPLY="$(( $1 / 1024 )) KB"
+  else REPLY="$1 B"
+  fi
+}
+
+# --- fetching -------------------------------------------------------------------------------------
+# Each request has a cache entry named by a checksum of its URL: <id>.json holds the last good body,
+# <id>.err the last failure (removed by a success). Fetches run in the background and replace the files
+# atomically; the TUI notices through their stamps. The token reaches curl on stdin (curl -K -), so it
+# never shows in the process list.
+
+jl_cache_id() { # string -> REPLY
+  REPLY=${${=$(print -rn -- "$1" | cksum)}[1]}
+}
+
+jl_auth_line() { # -> REPLY (curl config line), non-zero with JL_TOKEN_ERROR when the token is missing
+  if [[ -z $JL_TOKEN_CACHE ]]; then
+    if [[ -n $JIRA_TOKEN ]]; then JL_TOKEN_CACHE=$JIRA_TOKEN
+    elif [[ -n $JIRA_TOKEN_CMD ]]; then
+      JL_TOKEN_CACHE=$(sh -c "$JIRA_TOKEN_CMD" 2>/dev/null)
+      JL_TOKEN_CACHE=${JL_TOKEN_CACHE//[$'\r\n']/}
+      [[ -n $JL_TOKEN_CACHE ]] || { JL_TOKEN_ERROR="JIRA_TOKEN_CMD printed no token"; return 1 }
+    else JL_TOKEN_ERROR="set JIRA_TOKEN_CMD in config.zsh"; return 1
+    fi
+  fi
+  if [[ $JIRA_AUTH == basic ]]; then REPLY="user = \"$JIRA_EMAIL:$JL_TOKEN_CACHE\""
+  else REPLY="header = \"Authorization: Bearer $JL_TOKEN_CACHE\""
+  fi
+}
+
+# Starts a background GET unless one for the same entry is running. Query args are name=value pairs.
+typeset -gA JL_INFLIGHT
+jl_fetch() { # cache-id endpoint query-args...
+  local id=$1 endpoint=$2 auth; shift 2
+  local base="$JL_STATE_DIR/cache/$id"
+  (( JL_INFLIGHT[$id] && EPOCHSECONDS - JL_INFLIGHT[$id] < 30 )) && return 0
+  if ! jl_auth_line; then
+    print -r -- "$JL_TOKEN_ERROR" > "$base.err.tmp" && mv "$base.err.tmp" "$base.err"
+    return 1
+  fi
+  auth=$REPLY
+  local -a args=()
+  local q
+  for q; do args+=(--data-urlencode "$q"); done
+  JL_INFLIGHT[$id]=$EPOCHSECONDS
+  (
+    local code rc msg
+    local -a lines
+    code=$(print -r -- "$auth" | curl -sS -K - -G --max-time 20 -H 'Accept: application/json' \
+      -D "$base.$$.hdr" -o "$base.$$.body" -w '%{http_code}' "${args[@]}" "$JIRA_BASE_URL$endpoint" 2>"$base.$$.curl")
+    rc=$?
+    if (( rc == 0 )) && [[ $code == 2* ]] && jq -e . "$base.$$.body" >/dev/null 2>&1; then
+      mv "$base.$$.body" "$base.json"
+      rm -f "$base.err" "$base.$$.curl" "$base.$$.hdr"
+      exit
+    fi
+    if (( rc )); then
+      lines=("${(@f)$(<$base.$$.curl)}")
+      msg=${lines[-1]#curl: }
+      [[ $msg == *"resolve host"* || $msg == *"timed out"* || $msg == *"connect"* ]] && msg+=" — VPN?"
+    else
+      msg="HTTP $code: $(jq -r '[.errorMessages[]?, (.errors // {} | to_entries[] | "\(.key): \(.value)")] | join("; ")' "$base.$$.body" 2>/dev/null)"
+      [[ $msg == *": " ]] && msg+=$(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$base.$$.body" 2>/dev/null | head -1)
+      # Server/DC treats a token it doesn't accept as an anonymous request, which then fails on
+      # permissions (often a 400 for an "unknown" project) rather than with a 401
+      if [[ $code == 401 || $code == 403 ]] || grep -qi '^x-ausername: *anonymous' "$base.$$.hdr" 2>/dev/null; then
+        msg+=" — Jira didn't accept the token (JIRA_TOKEN_CMD)"
+      fi
+    fi
+    print -r -- "${msg:-request failed}" > "$base.err.tmp" && mv "$base.err.tmp" "$base.err"
+    rm -f "$base.$$.body" "$base.$$.curl" "$base.$$.hdr"
+  ) &!
+}
+
+# A finished fetch (success or failure) changes this stamp.
+jl_entry_stamp() { # cache-id -> REPLY
+  local f base="$JL_STATE_DIR/cache/$1"
+  local -A h
+  REPLY=""
+  for f in "$base.json" "$base.err"; do h=(); zstat -H h "$f" 2>/dev/null; REPLY+="$h[mtime]:$h[inode]."; done
+}
+
+jl_entry_age() { # cache-id -> REPLY seconds since the last good body (empty when there is none)
+  local m
+  m=$(zstat +mtime "$JL_STATE_DIR/cache/$1.json" 2>/dev/null) || { REPLY=""; return 1 }
+  REPLY=$(( EPOCHSECONDS - m ))
+}
+
+# A GET through the cache: the fetch starts when the entry is missing or older than ttl (0 forces it).
+jl_get() { # endpoint ttl query-args... -> REPLY cache id
+  local endpoint=$1 ttl=$2 id; shift 2
+  jl_cache_id "get|$JIRA_BASE_URL|$endpoint|$*"; id=$REPLY
+  jl_entry_age "$id"
+  if (( ttl == 0 )) || [[ -z $REPLY ]] || (( REPLY >= ttl )); then
+    jl_fetch "$id" "$endpoint" "$@"
+  fi
+  REPLY=$id
+}
+
+jl_search() { # jql [force] -> REPLY cache id
+  local ttl=$JIRA_REFRESH_SECS
+  [[ $2 == force ]] && ttl=0
+  jl_get /rest/api/2/search $ttl "jql=$1" "maxResults=$JIRA_MAX_RESULTS" "fields=$JL_SEARCH_FIELDS"
+}
+
+jl_issue() { # key [force] -> REPLY cache id
+  local ttl=60
+  [[ $2 == force ]] && ttl=0
+  jl_get "/rest/api/2/issue/$1" $ttl "expand=names" "fields=*all"
+}
+
+# --- browsing ------------------------------------------------------------------------------------
+
+# The views of a board: BR_LABEL (shown in the browser), BR_NAME (filter name) and BR_JQL. The active
+# sprint uses openSprints(), so a pinned filter keeps working when the next sprint starts.
+jl_board_entries() { # type board-jql [sprints-json-file]
+  setopt local_options extended_glob
+  local type=$1 bjql=$2 base order line
+  local -a act fut f
+  BR_LABEL=() BR_NAME=() BR_JQL=()
+  jl_strip_order "$bjql"; base=$REPLY
+  order=${bjql[${#base}+1,-1]}
+  order=${order##[[:space:]]#}
+  [[ -n $order ]] || order="ORDER BY Rank ASC"
+  [[ -n $base ]] && base="($base) AND "
+  if [[ $type == scrum ]]; then
+    if [[ -f $3 ]]; then
+      act=(${(f)"$(jq -r '.values[]? | select(.state == "active") | .name' "$3" 2>/dev/null)"})
+      fut=(${(f)"$(jq -r '.values[]? | select(.state == "future") | "\(.id)\u001f\(.name)"' "$3" 2>/dev/null)"})
+    fi
+    if (( ${#act} == 1 )); then BR_LABEL+=("Active sprint: $act[1]")
+    elif (( ${#act} > 1 )); then BR_LABEL+=("Active sprints (${#act})")
+    else BR_LABEL+=("Active sprint (none running)")
+    fi
+    BR_NAME+=("Active sprint") BR_JQL+=("${base}sprint in openSprints() $order")
+    for line in $fut; do
+      f=("${(@ps:$JL_US:)line}")
+      BR_LABEL+=("Sprint: $f[2]") BR_NAME+=("$f[2]") BR_JQL+=("${base}sprint = $f[1] $order")
+    done
+    BR_LABEL+=("Backlog") BR_NAME+=("Backlog")
+    BR_JQL+=("${base}(sprint is EMPTY OR sprint not in (openSprints(), futureSprints())) AND statusCategory != Done $order")
+  else
+    BR_LABEL+=("Board (not done)") BR_NAME+=("Board") BR_JQL+=("${base}statusCategory != Done $order")
+  fi
+  BR_LABEL+=("All issues") BR_NAME+=("All issues") BR_JQL+=("$bjql")
+}
+
+# The JQL limited to issues assigned to the current user; its ORDER BY stays at the end.
+jl_only_mine() { # jql -> REPLY
+  setopt local_options extended_glob
+  local jql=$1 base order
+  jl_strip_order "$jql"; base=$REPLY
+  order=${jql[${#base}+1,-1]}
+  order=${order##[[:space:]]#}
+  REPLY="${base:+($base) AND }assignee = currentUser()${order:+ $order}"
+}
+
+# The lines `p` appends to config.zsh. Quoted for zsh, so any quote in a name or the JQL is safe.
+jl_pin_text() { # dir context-name filter-name jql -> REPLY
+  local day
+  strftime -s day '%Y-%m-%d' $EPOCHSECONDS
+  REPLY=$'\n'"# pinned from the browser, $day"$'\n'"context ${(qq)1} ${(qq)2}"$'\n'"filter ${(qq)3} ${(qq)4}"$'\n'
+}

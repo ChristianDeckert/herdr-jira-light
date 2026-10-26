@@ -1,0 +1,37 @@
+{
+  "key": "GB-101",
+  "names": {
+    "summary": "Summary", "customfield_10105": "Sprint", "labels": "Labels", "customfield_2": "Platform",
+    "customfield_3": "Reviewer", "customfield_4": "Rank", "customfield_5": "Epic Link"
+  },
+  "fields": {
+    "summary": "Crash on login",
+    "status": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
+    "issuetype": { "name": "Bug" },
+    "priority": { "name": "High" },
+    "resolution": null,
+    "project": { "name": "Shop" },
+    "assignee": { "displayName": "Ann Example", "avatarUrls": {} },
+    "reporter": { "displayName": "Rob Reporter", "avatarUrls": {} },
+    "labels": ["ios", "login"],
+    "components": [{ "name": "App" }],
+    "fixVersions": [],
+    "created": "2026-10-01T09:00:00.000+0200",
+    "updated": "2026-10-26T10:02:00.000+0100",
+    "duedate": "2026-11-01",
+    "timeoriginalestimate": 3600, "timespent": 8100, "timeestimate": 0,
+    "customfield_10105": ["com.atlassian.greenhopper.service.sprint.Sprint@5f1[id=42,rapidViewId=7,state=ACTIVE,name=Sprint 42,startDate=2026-10-20]"],
+    "customfield_2": [{ "value": "iOS" }],
+    "customfield_3": { "displayName": "Rae Viewer", "emailAddress": "r@example.com" },
+    "customfield_4": "0|i0553r:",
+    "customfield_5": "GB-7",
+    "subtasks": [{ "key": "GB-102", "fields": { "summary": "Write test", "status": { "name": "Done", "statusCategory": { "key": "done" } } } }],
+    "issuelinks": [{ "type": { "inward": "is blocked by", "outward": "blocks" },
+                     "inwardIssue": { "key": "GB-90", "fields": { "summary": "API change", "status": { "name": "Open", "statusCategory": { "key": "new" } } } } }],
+    "attachment": [{ "filename": "shot.png", "size": 28779, "author": { "displayName": "Rob Reporter" }, "created": "2026-10-01T09:01:00.000+0200", "content": "https://jira.example.com/secure/attachment/1/shot.png" }],
+    "comment": { "comments": [
+      { "author": { "displayName": "Ann Example" }, "created": "2026-10-02T10:00:00.000+0200", "body": "first" },
+      { "author": { "displayName": "Rae Viewer" }, "created": "2026-10-03T10:00:00.000+0200", "body": "second *bold*" } ] },
+    "description": "Steps:\n1. open app"
+  }
+}

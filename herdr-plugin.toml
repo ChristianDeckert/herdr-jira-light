@@ -1,0 +1,28 @@
+id = "christiandeckert.jira-light"
+name = "Jira Light"
+version = "0.0.1"
+min_herdr_version = "0.9.4"
+description = "Jira issues in a herdr pane, with filters that follow the tab's working directory. zsh, curl and jq, no build step."
+platforms = ["macos", "linux"]
+
+# The pane itself; herdr runs it without a shell and closes the pane when it exits.
+[[panes]]
+id = "jira"
+title = "jira"
+placement = "split"
+command = ["zsh", "jira.zsh"]
+
+[[startup]]
+command = ["zsh", "panel.zsh", "restore"]
+
+[[actions]]
+id = "toggle"
+title = "Toggle Jira pane"
+contexts = ["workspace"]
+command = ["zsh", "panel.zsh", "toggle"]
+
+[[actions]]
+id = "refresh"
+title = "Refresh Jira pane"
+contexts = ["workspace"]
+command = ["zsh", "panel.zsh", "refresh"]
