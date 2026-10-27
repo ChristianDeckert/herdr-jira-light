@@ -28,7 +28,7 @@ jl_load_config() {
   typeset -g JL_SCOPE=0
   typeset -g JIRA_BASE_URL="" JIRA_AUTH=bearer JIRA_EMAIL="" JIRA_TOKEN="" JIRA_TOKEN_CMD=""
   typeset -g JIRA_MAX_RESULTS=50 JIRA_REFRESH_SECS=180 JIRA_INHERIT_GLOBAL=1
-  typeset -g JIRA_WIDTH=72 JIRA_RATIO="" JIRA_APPEARANCE=auto
+  typeset -g JIRA_WIDTH=72 JIRA_RATIO="" JIRA_APPEARANCE=auto JIRA_UPDATE_CHECK=on
   typeset -g JIRA_BRANCH_TEMPLATE='feature/{key}-{slug}'
   typeset -g JIRA_AGENT_PROMPT='Work on Jira issue {key}: {summary}\n{url}'
   JL_CONFIG_ERROR=""

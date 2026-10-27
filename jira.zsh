@@ -8,6 +8,7 @@ JL_ROOT=$ROOT
 source "$ROOT/lib/config.zsh"
 source "$ROOT/lib/jira.zsh"
 source "$ROOT/lib/markup.zsh"
+source "$ROOT/lib/update.zsh"
 LABEL="jira"
 setopt extended_glob
 
@@ -19,7 +20,9 @@ MOUSE_ON=$'\e[?1000h\e[?1006h\e[?7l\e[?2031h' MOUSE_OFF=$'\e[?1000l\e[?1006l\e[?
 
 APPEARANCE=dark
 apply_palette() {
-  [[ $APPEARANCE == light ]] && K=$'\e[38;5;128m' || K=$'\e[38;5;177m'
+  if [[ $APPEARANCE == light ]]; then K=$'\e[38;5;128m' BAR=$'\e[48;5;254m'
+  else K=$'\e[38;5;177m' BAR=$'\e[48;5;236m'
+  fi
 }
 
 # Sets APPEARANCE from the terminal's color-scheme report, else from its background brightness.
@@ -95,6 +98,27 @@ prompt_line() { # title hint value
   quiet_tty
   printf '\e[?25l%s' "$MOUSE_ON"
   REPLY=$v
+  FP=""
+}
+
+# Runs a command in this pane in place of the list, then waits for a key.
+run_inline() { # command
+  printf '%s\e[?25h\e[H\e[2J' "$MOUSE_OFF"
+  printf "${B}\$ %s${R}  ${D}(Ctrl-C stops)${R}\n\n" "$1"
+  normal_tty
+  trap ':' INT
+  zsh -c "$1"
+  local rc=$? k
+  trap 'exit 130' INT
+  quiet_tty
+  printf "\n${D}exit %s — press any key to return${R}" "$rc"
+  drain 0.05
+  # a late mouse report (ESC sequence) must not count as the key press
+  while read -r -s -k1 k </dev/tty; do
+    [[ $k == $'\e' ]] && { drain 0.05; continue }
+    break
+  done
+  printf '\e[?25l%s' "$MOUSE_ON"
   FP=""
 }
 
@@ -375,7 +399,7 @@ browse() {
 
 br_level() { # projects | boards | entries
   BR_LEVEL=$1 BR_Q="" BR_SEL=1 BR_TOP=0 BR_STAMP="" BR_FID="" BR_IDS=() BR_FIRST_VIEW=0
-  [[ $1 == entries ]] && BR_FIRST_VIEW=1
+  [[ $1 == (boards|entries) ]] && BR_FIRST_VIEW=1
   case $1 in
     projects)
       jl_get /rest/api/2/project 3600; BR_IDS+=($REPLY)
@@ -433,8 +457,10 @@ br_build_projects() { # cache-dir
 br_build_boards() { # cache-dir
   local c=$1 line
   local -a f
+  br_mine_row
   BR_ITEM+=("All open issues")
   BR_VAL+=("view:$BR_PKEY · All open issues${JL_US}project = $BR_PKEY AND resolution = Unresolved ORDER BY updated DESC")
+  (( BR_FIRST_VIEW )) && { BR_SEL=2 BR_FIRST_VIEW=0 }
   [[ -f $c/$BR_IDS[1].json ]] || return
   for line in ${(f)"$(jq -r '.values[]? | "\(.id)\u001f\(.name)\u001f\(.type)"' "$c/$BR_IDS[1].json" 2>/dev/null)"}; do
     f=("${(@ps:$JL_US:)line}")
@@ -446,10 +472,7 @@ br_build_boards() { # cache-dir
 # fetched once the configuration has arrived.
 br_build_entries() { # cache-dir
   local c=$1 fid k
-  if (( BR_MINE )); then BR_ITEM+=("$K☑$R only mine  ${D}assignee = currentUser()${R}")
-  else BR_ITEM+=("☐ only mine")
-  fi
-  BR_VAL+=("toggle:mine")
+  br_mine_row
   [[ -f $c/$BR_IDS[1].json ]] || return
   if [[ -z $BR_FID ]]; then
     fid=$(jq -r '.filter.id // empty' "$c/$BR_IDS[1].json" 2>/dev/null)
@@ -465,8 +488,17 @@ br_build_entries() { # cache-dir
   for (( k = 1; k <= ${#BR_LABEL}; k++ )); do
     BR_ITEM+=("$BR_LABEL[k]") BR_VAL+=("view:$BR_BNAME · $BR_NAME[k]$JL_US$BR_JQL[k]")
   done
-  # Enter on a board's views should open the active sprint, not flip the switch above it
+  # Enter on a board's views opens the active sprint, not the switch above it
   (( BR_FIRST_VIEW )) && { BR_SEL=2 BR_FIRST_VIEW=0 }
+}
+
+# The switch heads the board list and a board's views; it limits the view picked next to the issues
+# assigned to the current user.
+br_mine_row() {
+  if (( BR_MINE )); then BR_ITEM+=("$K☑$R only mine  ${D}assignee = currentUser()${R}")
+  else BR_ITEM+=("☐ only mine")
+  fi
+  BR_VAL+=("toggle:mine")
 }
 
 br_filter() {
@@ -499,7 +531,7 @@ br_open() {
     board:*) BR_BID=$f[1] BR_BNAME=$f[2] BR_BTYPE=$f[3]; br_level entries ;;
     toggle:mine) br_toggle_mine ;;
     view:*)
-      if (( BR_MINE )) && [[ $BR_LEVEL == entries ]]; then
+      if (( BR_MINE )); then
         jl_only_mine "$f[2]"; f=("$f[1] · mine" "$REPLY")
       fi
       CUSTOM_NAME=$f[1] CUSTOM_JQL=$f[2] CUSTOM_CTX_NAME=$BR_PNAME
@@ -508,8 +540,7 @@ br_open() {
   esac
 }
 
-# Limits the views of a board to issues assigned to the current user. Stays on for other boards
-# until it's switched off.
+# Stays on for other boards and projects until it's switched off.
 br_toggle_mine() {
   (( BR_MINE = ! BR_MINE ))
   br_build
@@ -534,7 +565,7 @@ filter_taken() { # context name
 # selects it there.
 pin_view() {
   (( FIDX == 0 )) || { note "p pins a view picked with b (browse) or typed with J" 1; return }
-  local suggest dir i ctxname name=$FILTER_NAME n=2
+  local suggest dir i j ctxname name=$FILTER_NAME n=2
   if (( CTX )); then suggest=$CTX_PATH[CTX]
   else suggest=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null) || suggest=$DIR
   fi
@@ -544,6 +575,9 @@ pin_view() {
   dir=${dir:A}
   i=${CTX_PATH[(Ie)$dir]}
   (( i )) && ctxname=$CTX_NAME[i] || ctxname=${CUSTOM_CTX_NAME:-${dir:t}}
+  for (( j = 1; i && j <= ${#FLT_NAME}; j++ )); do
+    [[ $FLT_CTX[j] == $i && $FLT_JQL[j] == "$CUSTOM_JQL" ]] && { note "already pinned there as “$FLT_NAME[j]”" 1; return }
+  done
   while filter_taken $i "$name"; do name="$FILTER_NAME ($n)"; (( n++ )); done
   jl_pin_text "$dir" "$ctxname" "$name" "$CUSTOM_JQL"
   if ! print -rn -- "$REPLY" >> "$JL_CONFIG"; then note "could not write $JL_CONFIG" 1; return; fi
@@ -560,7 +594,51 @@ reload_config() {
   CTX=-1
   jl_match_context "$d"
   switch_context $REPLY
+  [[ $MODE == manage ]] && mg_load
   note "config reloaded"
+}
+
+# --- pinned filters --------------------------------------------------------------------------------
+# m lists what p appended to config.zsh, grouped by directory; d removes an entry after a y.
+# Hand-written filters aren't listed. MG_ORDER holds the PIN_ indices in the order shown, MG_SEL a
+# position in it, MG_MAP the position of each drawn row (0 for a directory row).
+typeset -a MG_MAP MG_ORDER
+MG_SEL=1 MG_TOP=0 MG_CONFIRM=0
+
+mg_load() {
+  local d i
+  jl_pinned "$JL_CONFIG"
+  MG_ORDER=()
+  for d in "${(@u)PIN_DIR}"; do
+    for (( i = 1; i <= ${#PIN_AT}; i++ )); do [[ $PIN_DIR[i] == "$d" ]] && MG_ORDER+=($i); done
+  done
+}
+
+manage() {
+  mg_load
+  MODE=manage MG_SEL=1 MG_TOP=0 MG_CONFIRM=0 FP=""
+}
+
+mg_move() { # delta
+  (( ${#PIN_AT} )) || return
+  MG_SEL=$(( MG_SEL + $1 ))
+  (( MG_SEL > ${#PIN_AT} )) && MG_SEL=${#PIN_AT}
+  (( MG_SEL < 1 )) && MG_SEL=1
+  MG_CONFIRM=0 FP=""
+}
+
+mg_remove() {
+  local i=$MG_ORDER[MG_SEL] rc
+  local name=$PIN_NAME[i]
+  MG_CONFIRM=0 FP=""
+  jl_unpin "$JL_CONFIG" "$PIN_AT[i]" "$PIN_LINE[i]"; rc=$?
+  if (( rc == 1 )); then mg_load; note "config.zsh changed meanwhile; nothing removed, the list is fresh now" 1; return; fi
+  (( rc )) && { note "could not write $JL_CONFIG" 1; return }
+  CONFIG_STAMP=$(zstat +mtime "$JL_CONFIG" 2>/dev/null)
+  reload_config
+  (( MG_SEL > ${#PIN_AT} )) && MG_SEL=${#PIN_AT}
+  (( MG_SEL < 1 )) && MG_SEL=1
+  note "removed “$name”; the previous config is in config.zsh.bak"
 }
 
 move() { # delta
@@ -613,25 +691,113 @@ header_lines() {
   fi
 }
 
-footer_line() {
-  if [[ -n $NOTE ]] && (( EPOCHSECONDS < NOTE_UNTIL )); then
-    (( NOTE_ERR )) && fit "${RED}${NOTE}${R}" || fit "${K}${NOTE}${R}"
+# The footer is a bar of key/label pairs in columns, the most useful first, on as many rows as it needs
+# (at most three; the last pairs go when there is no room). A note takes over its first row for a few
+# seconds. FOOT_HIT holds row:first-column:last-column:key of each pair, so a click or tap presses it.
+typeset -a FOOT FOOT_HIT
+FOOT_N=1
+
+bar_line() { # text -> REPLY, padded to the width on the bar background
+  fit "$1"
+  local t=${REPLY%$R}
+  visible_len "$t"
+  REPLY="$BAR$t${(l:COLS - REPLY:: :)}$R"
+}
+
+hints() { # key label [key label ...]
+  local -a keys labels
+  local w=0 cols n i r c line pad len
+  while (( $# >= 2 )); do keys+=("$1") labels+=("$2"); shift 2; done
+  for (( i = 1; i <= ${#keys}; i++ )); do
+    len=$(( ${#keys[i]} + 1 + ${#labels[i]} ))
+    (( len > w )) && w=$len
+  done
+  (( w += 2 ))
+  # pairs that fit on one row sit side by side; columns only line up rows when there are several
+  len=0
+  for (( i = 1; i <= ${#keys}; i++ )); do (( len += ${#keys[i]} + 1 + ${#labels[i]} + 2 )); done
+  if (( len - 2 + 1 < COLS )); then
+    line=" " c=2
+    for (( i = 1; i <= ${#keys}; i++ )); do
+      (( i > 1 )) && { line+="  "; (( c += 2 )) }
+      line+="$K$B$keys[i]$R$BAR $labels[i]"
+      len=$(( ${#keys[i]} + 1 + ${#labels[i]} ))
+      FOOT_HIT+=("1:$c:$(( c + len - 1 )):$keys[i]")
+      (( c += len ))
+    done
+    bar_line "$line"; FOOT+=("$REPLY")
+    return
+  fi
+  cols=$(( COLS / w ))
+  (( cols < 1 )) && cols=1
+  n=${#keys}
+  (( n > cols * 3 )) && n=$(( cols * 3 ))
+  for (( r = 0; r * cols < n; r++ )); do
+    line=" "
+    for (( c = 0; c < cols && r * cols + c < n; c++ )); do
+      i=$(( r * cols + c + 1 ))
+      len=$(( ${#keys[i]} + 1 + ${#labels[i]} ))
+      pad=""
+      (( c < cols - 1 && i < n )) && pad=${(l:w - len:: :)}
+      line+="$K$B$keys[i]$R$BAR $labels[i]$pad"
+      FOOT_HIT+=("$(( r + 1 )):$(( 2 + c * w )):$(( 1 + (c + 1) * w )):$keys[i]")
+    done
+    bar_line "$line"; FOOT+=("$REPLY")
+  done
+}
+
+footer_lines() {
+  FOOT=() FOOT_HIT=()
+  if (( SEARCH )); then hints "↵" done esc clear
   else
-    NOTE=""
     case $MODE in
       list)
-        if (( FIDX )); then fit "${D}? help  ↵ details  f filter  s sort  / search  b browse  J jql  o open${R}"
-        else fit "${K}p pin${R}${D}  ? help  ↵ details  f filter  s sort  / search  b browse${R}"
+        if (( FIDX )); then hints "?" help "↵" details f filter s sort / search b browse m manage J jql o open
+        else hints p pin "?" help "↵" details f filter s sort / search b browse m manage o open
         fi ;;
       browse)
-        if [[ $BR_LEVEL == entries ]]; then fit "${D}type to narrow  ↵ open  ⇥ only mine  ← back  esc close${R}"
-        else fit "${D}type to narrow  ↵ open  ← back  esc close${R}"
+        if [[ $BR_LEVEL == projects ]]; then hints "↵" open esc close
+        elif (( BR_MINE )); then hints "⇥" "all issues" "↵" open "←" back esc close
+        else hints "⇥" "only mine" "↵" open "←" back esc close
         fi ;;
-      detail) fit "${D}esc back  ? help  ⇥ link  ↵ follow  o open  y key  a agent${R}" ;;
-      help) fit "${D}↑↓ scroll  any other key closes${R}" ;;
-      *) fit "${D}esc back${R}" ;;
+      detail) hints esc back "?" help "⇥" link "↵" follow o open y key Y branch a agent ;;
+      manage)
+        if (( MG_CONFIRM )); then hints y "remove “$PIN_NAME[MG_ORDER[MG_SEL]]”" n keep
+        else hints d remove esc back "?" help
+        fi ;;
+      help) hints "↑↓" scroll esc close ;;
+      agents) hints 1-9 pick esc back ;;
     esac
   fi
+  # an available update gets a row of its own above the keys of the list
+  if [[ $MODE == list ]] && (( ! SEARCH )) && update_available; then
+    local h
+    local -a hit=()
+    for h in $FOOT_HIT; do hit+=("$(( ${h%%:*} + 1 )):${h#*:}"); done
+    bar_line " $K${B}u$R$BAR ${B}update to ${UPDATE[version]:-the new version}$R$BAR  herdr shows what changes and asks first"
+    FOOT=("$REPLY" "${FOOT[@]}") FOOT_HIT=("1:1:${COLS}:u" "${hit[@]}")
+  fi
+  if [[ -n $NOTE ]] && (( EPOCHSECONDS < NOTE_UNTIL )); then
+    (( NOTE_ERR )) && bar_line " $RED$NOTE" || bar_line " $K$NOTE"
+    FOOT[1]=$REPLY FOOT_HIT=(${FOOT_HIT:#1:*})
+  else
+    NOTE=""
+  fi
+  (( ${#FOOT} )) || { bar_line ""; FOOT=("$REPLY") }
+  FOOT_N=${#FOOT}
+}
+
+# A tap on a footer hint does what its key does.
+press() { # hint key
+  case $1 in
+    esc) escape '' ;;
+    ←) escape '[D' ;;
+    ↵) key_press $'\r' ;;
+    ⇥) key_press $'\t' ;;
+    ↑↓|1-9) ;;
+    *) key_press "$1" ;;
+  esac
+  FP=""
 }
 
 row_line() { # rows-index selected(0|1) key-width
@@ -656,7 +822,7 @@ draw_list() {
   local i kw=6 len avail
   header_lines
   HDR=${#VIEW}
-  LH=$(( LINES - HDR - 1 ))
+  LH=$(( LINES - HDR - FOOT_N ))
   (( LH < 1 )) && LH=1
   for i in $VISIBLE; do len=${#${ROWS[i]%%$JL_US*}}; (( len > kw )) && kw=$len; done
   (( SEL <= TOP )) && TOP=$(( SEL - 1 ))
@@ -866,7 +1032,7 @@ draw_detail() {
   lr "$left" "$back"
   VIEW+=("$REPLY")
   detail_lines
-  LH=$(( LINES - 2 ))
+  LH=$(( LINES - 1 - FOOT_N ))
   (( DSCROLL > ${#DLINES} - LH )) && DSCROLL=$(( ${#DLINES} - LH ))
   (( DSCROLL < 0 )) && DSCROLL=0
   local i end=$DCUR
@@ -899,7 +1065,9 @@ draw_help() {
     "J" "type a JQL query"
     "b" "browse projects, boards, sprints"
     "p" "pin the view (from b or J) to a directory"
-    "r  R" "fetch again / reload config"
+    "m" "manage pinned filters"
+    "r  R" "fetch again / reload config, check for updates"
+    "u" "update the plugin, when the bar offers it"
     "o" "open the issue in the browser"
     "y  Y" "copy key / branch name"
     "a" "send the issue to an agent"
@@ -914,9 +1082,15 @@ draw_help() {
     "" "Browser (b)"
     "type" "narrow the list"
     "↵ → click" "open"
-    "⇥" "only mine (on a board's views)"
+    "⇥" "only mine (board list and a board's views)"
     "← ⌫" "back one level"
-    "esc" "clear the typing, then close")
+    "esc" "clear the typing, then close"
+    "" "Pinned filters (m)"
+    "↑↓ j k" "move"
+    "d ⌫ del" "remove, after y to confirm"
+    "esc ← q" "back"
+    "" "Footer"
+    "tap" "a key in the bar presses it")
   local i
   local -a lines=(" ${K}${B}Jira Light${R} ${D}— keys, ↑↓ scroll, any other key closes${R}")
   for (( i = 1; i < ${#rows}; i += 2 )); do
@@ -925,7 +1099,9 @@ draw_help() {
     fi
   done
   lines+=("" " ${D}Filters for a directory: context + filter in${R}" " ${D}${JL_CONFIG/#$HOME/~}${R}")
-  LH=$(( LINES - 1 ))
+  update_status
+  [[ -n $REPLY ]] && lines+=("" " ${D}${REPLY}${R}")
+  LH=$(( LINES - FOOT_N ))
   (( HSCROLL > ${#lines} - LH )) && HSCROLL=$(( ${#lines} - LH ))
   (( HSCROLL < 0 )) && HSCROLL=0
   for (( i = HSCROLL + 1; i <= ${#lines} && i <= HSCROLL + LH; i++ )); do fit "$lines[i]"; VIEW+=("$REPLY"); done
@@ -935,7 +1111,7 @@ draw_browse() {
   local crumb i n=${#BR_VIS} line
   case $BR_LEVEL in
     projects) crumb="Projects" ;;
-    boards) crumb="$BR_PKEY · $BR_PNAME" ;;
+    boards) crumb="$BR_PKEY · $BR_PNAME"; (( BR_MINE )) && crumb+=" · mine" ;;
     entries) crumb="$BR_PKEY › $BR_BNAME"; (( BR_MINE )) && crumb+=" · mine" ;;
   esac
   lr "${K}${B}Browse${R} ${D}·${R} ${B}${crumb}${R}" "${D}${n}/${#BR_ITEM}${R}"
@@ -946,7 +1122,7 @@ draw_browse() {
   VIEW+=("$REPLY")
   if [[ -n $BR_ERR ]]; then fit " ${RED}${BR_ERR}${R}"; VIEW+=("$REPLY"); fi
   HDR=${#VIEW}
-  LH=$(( LINES - HDR - 1 ))
+  LH=$(( LINES - HDR - FOOT_N ))
   (( LH < 1 )) && LH=1
   (( BR_SEL <= BR_TOP )) && BR_TOP=$(( BR_SEL - 1 ))
   (( BR_SEL > BR_TOP + LH )) && BR_TOP=$(( BR_SEL - LH ))
@@ -964,6 +1140,39 @@ draw_browse() {
   done
 }
 
+draw_manage() {
+  local n=${#PIN_AT} d="" i j k sr=0 name
+  local -a rows
+  lr "${K}${B}Pinned filters${R}" "${D}${n} in config.zsh${R}"
+  VIEW+=("$REPLY")
+  HDR=${#VIEW}
+  LH=$(( LINES - HDR - FOOT_N ))
+  (( LH < 1 )) && LH=1
+  MG_MAP=()
+  if (( ! n )); then VIEW+=("" "  ${D}nothing pinned yet — pick a view with b and press p${R}"); return; fi
+  for (( k = 1; k <= n; k++ )); do
+    i=$MG_ORDER[k]
+    if [[ $PIN_DIR[i] != "$d" ]]; then
+      d=$PIN_DIR[i] j=${CTX_PATH[(Ie)$PIN_DIR[i]]}
+      (( j )) && name=$CTX_NAME[j] || name=${PIN_CTX[i]:-${d:t}}
+      (( ${#rows} )) && { rows+=("") MG_MAP+=(0) }
+      fit " ${K}${d/#$HOME/~}${R} ${D}· ${name}${R}"; rows+=("$REPLY") MG_MAP+=(0)
+    fi
+    MG_MAP+=($k)
+    if (( k == MG_SEL )); then
+      sr=${#MG_MAP}
+      fit "${INV}▸ $PIN_NAME[i]  $PIN_JQL[i]${(l:COLS:: :)}"; rows+=("${REPLY%$R}$R")
+    else
+      fit "  $PIN_NAME[i]  ${D}$PIN_JQL[i]${R}"; rows+=("$REPLY")
+    fi
+  done
+  # the directory row above a group's first entry scrolls into view with it
+  (( sr - 1 <= MG_TOP )) && MG_TOP=$(( sr - 2 ))
+  (( sr > MG_TOP + LH )) && MG_TOP=$(( sr - LH ))
+  (( MG_TOP < 0 )) && MG_TOP=0
+  for (( i = MG_TOP + 1; i <= ${#rows} && i <= MG_TOP + LH; i++ )); do VIEW+=("$rows[i]"); done
+}
+
 draw_agents() {
   local i p name
   VIEW+=(" ${K}${B}Send $ISSUE[key] to which agent?${R}" "")
@@ -977,21 +1186,32 @@ draw_agents() {
 
 paint() {
   VIEW=()
+  footer_lines
   case $MODE in
     list) draw_list ;;
     detail) draw_detail ;;
     help) draw_help ;;
     agents) draw_agents ;;
     browse) draw_browse ;;
+    manage) draw_manage ;;
   esac
-  while (( ${#VIEW} < LINES - 1 )); do VIEW+=(""); done
-  VIEW=("${(@)VIEW[1,LINES-1]}")
-  footer_line; VIEW+=("$REPLY")
+  while (( ${#VIEW} < LINES - FOOT_N )); do VIEW+=(""); done
+  VIEW=("${(@)VIEW[1,LINES-FOOT_N]}")
+  VIEW+=("${FOOT[@]}")
   printf '\e]0;%s\a\e[H%s\e[K\e[J' "$LABEL" "${(pj:\e[K\n:)VIEW}"
 }
 
 # --- input -----------------------------------------------------------------------------------------
 click() { # row column
+  local h
+  local -a p
+  if (( $1 > LINES - FOOT_N )); then
+    for h in $FOOT_HIT; do
+      p=("${(@s.:.)h}")
+      (( p[1] == $1 - LINES + FOOT_N && $2 >= p[2] && $2 <= p[3] )) && { press "$p[4]"; return }
+    done
+    return
+  fi
   case $MODE in
     list)
       local i=$(( TOP + $1 - HDR ))
@@ -1004,6 +1224,10 @@ click() { # row column
     detail)
       local i=$(( DSCROLL + $1 - 1 ))
       (( $1 > 1 && i <= ${#DACT} )) && [[ -n $DACT[i] ]] && detail_act "$DACT[i]" ;;
+    manage)
+      local i=$(( MG_TOP + $1 - HDR ))
+      (( $1 > HDR && i >= 1 && i <= ${#MG_MAP} && MG_MAP[i] )) || return
+      MG_SEL=$MG_MAP[i] MG_CONFIRM=0 FP="" ;;
     help) MODE=$HELP_BACK FP="" ;;
   esac
 }
@@ -1012,6 +1236,7 @@ scroll() { # delta
   case $MODE in
     list) move $1 ;;
     browse) br_move $1 ;;
+    manage) mg_move $1 ;;
     help) HSCROLL=$(( HSCROLL + $1 )); FP="" ;;
     detail) DSCROLL=$(( DSCROLL + $1 )); FP="" ;;
   esac
@@ -1032,12 +1257,14 @@ key_list() { # key
     /) SEARCH=1 FP="" ;;
     J) custom_jql ;;
     r) load_entry force; note "fetching…" ;;
-    R) reload_config ;;
+    R) reload_config; update_check force ;;
+    u) update_available && update_now ;;
     o) selected_issue && open_url "$ISSUE[url]" ;;
     y) selected_issue && copy "$ISSUE[key]" key ;;
     Y) selected_issue && { jl_fill "$JIRA_BRANCH_TEMPLATE" ISSUE; copy "$REPLY" branch } ;;
     a) pick_agent ;;
     b) browse ;;
+    m) manage ;;
     p) pin_view ;;
     \?) show_help ;;
     q) "$H" pane close "$HERDR_PANE_ID" >/dev/null 2>&1; exit ;;
@@ -1067,13 +1294,51 @@ key_browse() {
     $'\x7f'|$'\b') if [[ -z $BR_Q ]]; then br_up; return; fi; BR_Q=${BR_Q[1,-2]} ;;
     $'\x15') BR_Q="" ;;
     $'\n'|$'\r') br_open; return ;;
-    $'\t') [[ $BR_LEVEL == entries ]] && br_toggle_mine; return ;;
+    $'\t') [[ $BR_LEVEL == (boards|entries) ]] && br_toggle_mine; return ;;
     [[:print:]]) BR_Q+=$1 ;;
     *) return ;;
   esac
   BR_SEL=1 BR_TOP=0 BR_FIRST_VIEW=0
   br_filter
+  # Enter after typing picks the first match, not the switch that stays on top
+  (( ${#BR_VIS} > 1 )) && [[ $BR_VAL[BR_VIS[1]] == toggle:* ]] && BR_SEL=2
   FP=""
+}
+
+key_press() { # key
+  if (( SEARCH )); then key_search "$1"
+  else
+    case $MODE in
+      list) key_list "$1" ;;
+      browse) key_browse "$1" ;;
+      detail) key_detail "$1" ;;
+      manage) key_manage "$1" ;;
+      help)
+        case $1 in
+          j) scroll 1 ;;
+          k) scroll -1 ;;
+          *) MODE=$HELP_BACK FP="" ;;
+        esac ;;
+      agents)
+        if [[ $1 == [1-9] ]] && (( $1 <= ${#AGENTS} )); then MODE=$MODE_BACK FP=""; send_to_agent $AGENTS[$1]
+        else MODE=$MODE_BACK FP=""
+        fi ;;
+    esac
+  fi
+}
+
+key_manage() {
+  if (( MG_CONFIRM )); then
+    if [[ $1 == y ]]; then mg_remove; else MG_CONFIRM=0 FP=""; fi
+    return
+  fi
+  case $1 in
+    j) mg_move 1 ;;
+    k) mg_move -1 ;;
+    d|$'\x7f'|$'\b') (( ${#PIN_AT} )) && { MG_CONFIRM=1 FP="" } ;;
+    q|h) MODE=list FP="" ;;
+    \?) show_help ;;
+  esac
 }
 
 key_search() {
@@ -1098,6 +1363,7 @@ escape() { # sequence after ESC
       elif [[ $MODE == browse && -n $BR_Q ]]; then BR_Q=""; br_filter
       elif [[ $MODE == detail ]]; then detail_back
       elif [[ $MODE == help ]]; then MODE=$HELP_BACK
+      elif [[ $MODE == manage ]] && (( MG_CONFIRM )); then MG_CONFIRM=0
       else MODE=list
       fi
       FP="" ;;
@@ -1106,6 +1372,7 @@ escape() { # sequence after ESC
     [[O]C) case $MODE in list) open_detail ;; browse) br_open ;; esac ;;
     [[O]D) case $MODE in browse) br_up ;; detail) detail_back ;; help) MODE=$HELP_BACK FP="" ;; *) MODE=list FP="" ;; esac ;;
     '[Z') [[ $MODE == detail ]] && detail_link -1 ;;
+    '[3~') [[ $MODE == manage ]] && key_manage d ;;
     '[5~') scroll $(( -LH + 1 )) ;;
     '[6~') scroll $(( LH - 1 )) ;;
     '[H'|'[1~') scroll -100000 ;;
@@ -1141,28 +1408,34 @@ handle_input() {
       else
         escape "$seq"
       fi
-    elif (( SEARCH )); then key_search "$k"
-    elif [[ $MODE == browse ]]; then key_browse "$k"
     else
-      case $MODE in
-        list) key_list "$k" ;;
-        detail) key_detail "$k" ;;
-        help)
-          case $k in
-            j) scroll 1 ;;
-            k) scroll -1 ;;
-            *) MODE=$HELP_BACK FP="" ;;
-          esac ;;
-        agents)
-          if [[ $k == [1-9] ]] && (( k <= ${#AGENTS} )); then MODE=$MODE_BACK FP=""; send_to_agent $AGENTS[k]
-          else MODE=$MODE_BACK FP=""
-          fi ;;
-      esac
+      key_press "$k"
     fi
     (( ++n < 200 )) || break
     read -r -s -k1 -t 0.01 k </dev/tty || break
   done
   (( delta )) && scroll $delta
+}
+
+# The pane runs the code it started with; when the plugin is updated (or edited, when linked), it
+# starts itself again, once the new files pass a syntax check.
+code_stamp() { # -> REPLY
+  local f
+  local -a t
+  REPLY=""
+  for f in "$ROOT/jira.zsh" "$ROOT"/lib/*.zsh(N); do t=(); zstat -A t +mtime "$f" 2>/dev/null; REPLY+="$t[1]:"; done
+}
+
+restart_if_updated() {
+  code_stamp
+  [[ $REPLY == "$CODE_STAMP" ]] && return
+  local f
+  for f in "$ROOT/jira.zsh" "$ROOT"/lib/*.zsh(N); do zsh -n "$f" 2>/dev/null || return; done
+  save_view
+  printf '%s\e[?25h' "$MOUSE_OFF"
+  normal_tty
+  export JL_RESTARTED=1
+  exec zsh "$ROOT/jira.zsh"
 }
 
 # --- main ------------------------------------------------------------------------------------------
@@ -1177,6 +1450,12 @@ MODE=list DIR="" LAST_FOCUSED="" FP="" CTX=-1 FIDX=1 SORT=filter REV=0 SEL=1 TOP
 SEARCH=0 QUERY="" NOTE="" NOTE_UNTIL=0 NOTE_ERR=0 ENTRY="" ENTRY_STAMP="" ERR=""
 typeset -a ROWS VISIBLE VIEW DLINES AGENTS TAB_AGENTS WS_AGENTS JL_FILTERS
 CONFIG_STAMP=$(zstat +mtime "$JL_CONFIG" 2>/dev/null)
+code_stamp; CODE_STAMP=$REPLY
+ROOT_STAMP=$(zstat +mtime "$ROOT_FILE" 2>/dev/null) UPDATE_STAMP=""
+update_check
+read_update
+(( ${JL_RESTARTED:-0} )) && note "updated to the new version"
+unset JL_RESTARTED
 # herdr's pane list is polled every POLL_EVERY seconds; the cache files are checked on every pass,
 # which costs no process.
 POLL_EVERY=2 LAST_POLL=0 NEED_POLL=1
@@ -1191,6 +1470,10 @@ while :; do
       reload_config
     fi
     refresh_if_stale
+    follow_update
+    restart_if_updated
+    update_check $JL_UPDATE_EVERY
+    read_update && FP=""
     LAST_POLL=$EPOCHREALTIME NEED_POLL=0
   fi
   read_entry

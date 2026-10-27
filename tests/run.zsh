@@ -158,6 +158,26 @@ eq "pinned filter name" "$FLT_NAME[-1]" "Board · it's active"
 eq "pinned filter jql" "$FLT_JQL[-1]" "summary ~ 'x' AND sprint in openSprints()"
 jl_filters_for 1; eq "pinned filter listed" "${(j:,:)JL_FILTERS}" "2,4,1"
 
+# managing pins: only the blocks p wrote are listed, and removing one leaves every other line as it was
+jl_pin_text "$TMP/work/other" "Other" 'Say "hi"' 'project = O'
+print -rn -- "$REPLY" >> "$JIRA_LIGHT_CONFIG_DIR/config.zsh"
+cfg="$JIRA_LIGHT_CONFIG_DIR/config.zsh"
+jl_pinned "$cfg"
+eq "pinned count" ${#PIN_AT} 2
+eq "pinned names" "${(j:|:)PIN_NAME}" "Board · it's active|Say \"hi\""
+eq "pinned jql" "$PIN_JQL[1]" "summary ~ 'x' AND sprint in openSprints()"
+eq "pinned dir" "$PIN_DIR[2]" "${TMP:A}/work/other"
+eq "pinned context name" "$PIN_CTX[2]" "Other"
+before=$(<$cfg)
+jl_unpin "$cfg" "$PIN_AT[1]" "filter 'other' 'line'"; eq "stale unpin refused" $? 1
+eq "stale unpin leaves the file" "$(<$cfg)" "$before"
+jl_unpin "$cfg" "$PIN_AT[1]" "$PIN_LINE[1]"; eq "unpin" $? 0
+eq "unpin keeps a backup" "$(<$cfg.bak)" "$before"
+zsh -n "$cfg"; eq "unpinned config parses" $? 0
+jl_pinned "$cfg"; eq "one pin left" "${(j:|:)PIN_NAME}" "Say \"hi\""
+eq "hand-written lines kept" "$(grep -v pinned "$cfg" | grep -c .)" 9
+jl_load_config; eq "unpinned filter gone" "${(j:|:)FLT_NAME}" "Mine|Sprint|Core|Say \"hi\""
+
 # a broken config reports its first error line and keeps a usable default filter
 print 'filter "Broken" $(' > "$JIRA_LIGHT_CONFIG_DIR/config.zsh"
 jl_load_config

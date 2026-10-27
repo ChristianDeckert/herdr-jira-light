@@ -360,3 +360,31 @@ jl_pin_text() { # dir context-name filter-name jql -> REPLY
   strftime -s day '%Y-%m-%d' $EPOCHSECONDS
   REPLY=$'\n'"# pinned from the browser, $day"$'\n'"context ${(qq)1} ${(qq)2}"$'\n'"filter ${(qq)3} ${(qq)4}"$'\n'
 }
+
+# The blocks jl_pin_text appended: its comment directly followed by a context and a filter line.
+# Hand-written filters are not listed. PIN_LINE keeps the filter line as written, for jl_unpin.
+jl_pinned() { # config-file -> PIN_AT PIN_DATE PIN_DIR PIN_CTX PIN_NAME PIN_JQL PIN_LINE
+  typeset -ga PIN_AT=() PIN_DATE=() PIN_DIR=() PIN_CTX=() PIN_NAME=() PIN_JQL=() PIN_LINE=()
+  [[ -f $1 ]] || return 0
+  local -a lines=("${(@f)$(<$1)}") c f
+  local i
+  for (( i = 1; i + 2 <= ${#lines}; i++ )); do
+    [[ $lines[i] == '# pinned from the browser, '* && $lines[i+1] == 'context '* && $lines[i+2] == 'filter '* ]] || continue
+    c=("${(@Q)${(z)lines[i+1]}}") f=("${(@Q)${(z)lines[i+2]}}")
+    (( ${#c} >= 2 && ${#f} == 3 )) || continue
+    PIN_AT+=($i) PIN_DATE+=("${lines[i]#\# pinned from the browser, }") PIN_DIR+=("${${c[2]/#\~/$HOME}:A}")
+    PIN_CTX+=("$c[3]") PIN_NAME+=("$f[2]") PIN_JQL+=("$f[3]") PIN_LINE+=("$lines[i+2]")
+  done
+}
+
+# Removes the pinned block whose comment is on line `at`, and the blank line before it. Returns 1 when
+# that block no longer holds the filter line (the file was edited meanwhile), 2 when writing failed.
+# The previous file is kept as .bak; the copy through .tmp keeps the file's permissions.
+jl_unpin() { # config-file at filter-line
+  local -a lines=("${(@f)$(<$1)}")
+  local at=$2 from=$2
+  [[ $lines[at] == '# pinned from the browser, '* && $lines[at+1] == 'context '* && $lines[at+2] == "$3" ]] || return 1
+  (( at > 1 )) && [[ -z $lines[at-1] ]] && from=$(( at - 1 ))
+  lines[from,at+2]=()
+  cp -p "$1" "$1.bak" && cp -p "$1" "$1.tmp" && print -rl -- "${(@)lines}" >| "$1.tmp" && mv "$1.tmp" "$1" || return 2
+}

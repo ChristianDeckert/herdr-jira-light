@@ -17,6 +17,7 @@ JIRA_TOKEN_CMD="security find-generic-password -s jira-pat -w"
 # JIRA_WIDTH=72             # pane width in columns when it opens (at most half the split)
 # JIRA_RATIO=""             # or a fixed share of the split for the main pane, e.g. 0.6
 # JIRA_APPEARANCE=auto      # auto | dark | light
+# JIRA_UPDATE_CHECK=on      # on: ask GitHub for a newer version (at start, every 6 h, and on R); off
 
 # Templates for Y (copy branch name) and a (send to agent). Placeholders: {key} {summary} {slug} {url}
 # {status} {type} {priority} {assignee}; \n is a line break.
@@ -34,4 +35,4 @@ filter "Recently updated (7d)" 'updated >= -7d ORDER BY updated DESC'
 # filter "Active sprint" 'project = APP AND sprint in openSprints() ORDER BY rank'
 # filter "Next sprint"   'project = APP AND sprint in futureSprints() ORDER BY rank'
 
-# p in the pane appends the views you pin from the browser (b) below.
+# p in the pane appends the views you pin from the browser (b) below; m lists and removes them.
