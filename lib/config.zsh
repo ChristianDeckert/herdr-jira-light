@@ -26,9 +26,9 @@ filter() { # name jql
 jl_load_config() {
   typeset -ga CTX_PATH=() CTX_NAME=() FLT_CTX=() FLT_NAME=() FLT_JQL=()
   typeset -g JL_SCOPE=0
-  typeset -g JIRA_BASE_URL="" JIRA_AUTH=bearer JIRA_EMAIL="" JIRA_TOKEN="" JIRA_TOKEN_CMD=""
+  typeset -g JIRA_BASE_URL="" JIRA_AUTH=bearer JIRA_EMAIL="" JIRA_TOKEN="" JIRA_TOKEN_CMD="" JIRA_KEYCHAIN_SERVICE=jira-pat
   typeset -g JIRA_MAX_RESULTS=50 JIRA_REFRESH_SECS=180 JIRA_INHERIT_GLOBAL=1
-  typeset -g JIRA_WIDTH=72 JIRA_RATIO="" JIRA_APPEARANCE=auto JIRA_UPDATE_CHECK=on
+  typeset -g JIRA_WIDTH=72 JIRA_RATIO="" JIRA_APPEARANCE=auto JIRA_UPDATE_CHECK=on JIRA_POINTS_FIELD=auto
   typeset -g JIRA_BRANCH_TEMPLATE='feature/{key}-{slug}'
   typeset -g JIRA_AGENT_PROMPT='Work on Jira issue {key}: {summary}\n{url}'
   JL_CONFIG_ERROR=""

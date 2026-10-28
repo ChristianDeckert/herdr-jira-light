@@ -1,0 +1,44 @@
+[
+  {
+    "id": "customfield_901",
+    "name": "Original story points",
+    "custom": true,
+    "schema": {
+      "type": "number"
+    }
+  },
+  {
+    "id": "customfield_902",
+    "name": "Story Points",
+    "custom": true,
+    "schema": {
+      "type": "number"
+    }
+  },
+  {
+    "id": "customfield_903",
+    "name": "Story points note",
+    "custom": true,
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "id": "timespent",
+    "name": "Time Spent",
+    "custom": false,
+    "schema": {
+      "type": "number"
+    }
+  },
+  {
+    "id": "customfield_904",
+    "name": "Flagged",
+    "custom": true,
+    "schema": {
+      "type": "array",
+      "items": "option",
+      "custom": "com.atlassian.jira.plugin.system.customfieldtypes:multicheckboxes"
+    }
+  }
+]

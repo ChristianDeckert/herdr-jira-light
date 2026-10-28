@@ -1,0 +1,92 @@
+{
+  "expand": "transitions",
+  "transitions": [
+    {
+      "id": "21",
+      "name": "Start review",
+      "to": {
+        "name": "In Review",
+        "statusCategory": {
+          "key": "indeterminate"
+        }
+      },
+      "fields": {
+        "assignee": {
+          "required": true,
+          "name": "Assignee",
+          "hasDefaultValue": false
+        }
+      }
+    },
+    {
+      "id": "31",
+      "name": "Resolve",
+      "to": {
+        "name": "Done",
+        "statusCategory": {
+          "key": "done"
+        }
+      },
+      "fields": {
+        "resolution": {
+          "required": true,
+          "name": "Resolution",
+          "hasDefaultValue": false
+        },
+        "fixVersions": {
+          "required": true,
+          "name": "Fix Version/s",
+          "hasDefaultValue": true
+        },
+        "comment": {
+          "required": false,
+          "name": "Comment"
+        }
+      }
+    },
+    {
+      "id": "11",
+      "name": "Stop progress",
+      "to": {
+        "name": "To Do",
+        "statusCategory": {
+          "key": "new"
+        }
+      }
+    },
+    {
+      "id": "41",
+      "name": "Start progress",
+      "to": {
+        "name": "In Progress",
+        "statusCategory": {
+          "key": "indeterminate"
+        }
+      },
+      "fields": {
+        "customfield_100": {
+          "required": true,
+          "name": "Team",
+          "hasDefaultValue": false,
+          "operations": [
+            "set"
+          ],
+          "schema": {
+            "type": "option",
+            "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select"
+          },
+          "allowedValues": [
+            {
+              "id": "501",
+              "value": "Mobile"
+            },
+            {
+              "id": "502",
+              "value": "Web"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

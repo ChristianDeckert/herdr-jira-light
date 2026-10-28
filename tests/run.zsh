@@ -78,8 +78,8 @@ jl_age ""; eq "age empty" "$REPLY" "—"
 jl_parse_rows "$ROOT/tests/fixtures/search.json"
 eq "row count" "${#ROWS}" 2
 eq "total" "$ROWS_TOTAL" 2
-eq "row fields" "${(j:|:)${(@ps:$JL_US:)ROWS[1]}}" "GB-101|In Progress|indeterminate|Bug|High|Ann Example|2026-10-26T10:02:00.000+0100|Crash on login with tab"
-eq "row defaults" "${(j:|:)${(@ps:$JL_US:)ROWS[2]}}" "GB-99|To Do|new|Story|—|—|2026-10-20T08:00:00.000+0200|Wishlist"
+eq "row fields" "${(j:|:)${(@ps:$JL_US:)ROWS[1]}}" "GB-101|In Progress|indeterminate|Bug|High|Ann Example|2026-10-26T10:02:00.000+0100|Crash on login with tab|28800|7200|21600||"
+eq "row defaults" "${(j:|:)${(@ps:$JL_US:)ROWS[2]}}" "GB-99|To Do|new|Story|—|—|2026-10-20T08:00:00.000+0200|Wishlist|0|0|0||"
 typeset -A DETAIL
 typeset -a DREC
 jl_parse_detail "$ROOT/tests/fixtures/issue.json"
@@ -177,6 +177,191 @@ zsh -n "$cfg"; eq "unpinned config parses" $? 0
 jl_pinned "$cfg"; eq "one pin left" "${(j:|:)PIN_NAME}" "Say \"hi\""
 eq "hand-written lines kept" "$(grep -v pinned "$cfg" | grep -c .)" 9
 jl_load_config; eq "unpinned filter gone" "${(j:|:)FLT_NAME}" "Mine|Sprint|Core|Say \"hi\""
+
+# the token's keychain entry: per platform, with stand-ins for security and secret-tool
+mkdir -p "$TMP/bin"
+for t in security secret-tool; do
+  print -r -- '#!/bin/sh
+[ -n "$STUB_TOKEN" ] && printf "%s\n" "$STUB_TOKEN" || exit 44' > "$TMP/bin/$t"
+  chmod +x "$TMP/bin/$t"
+done
+path=("$TMP/bin" $path); rehash
+jl_keychain_cmd lookup darwin; eq "mac lookup" "$REPLY" "security find-generic-password -s 'jira-pat' -w"
+jl_keychain_cmd store darwin; eq "mac store asks itself" "$REPLY" "security add-generic-password -U -s 'jira-pat' -a \"\$USER\" -w"
+JIRA_KEYCHAIN_SERVICE="my pat"
+jl_keychain_cmd lookup linux-gnu; eq "linux lookup" "$REPLY" "secret-tool lookup service 'my pat'"
+jl_keychain_cmd store linux-gnu; eq "linux store" "$REPLY" "secret-tool store --label='Jira personal access token' service 'my pat'"
+JIRA_KEYCHAIN_SERVICE=jira-pat
+path=(${path:#$TMP/bin}); rm "$TMP/bin/secret-tool"; path=("$TMP/bin" $path); rehash
+if (( ! $+commands[secret-tool] )); then
+  jl_keychain_cmd lookup linux-gnu; eq "missing tool fails" $? 1
+  eq "missing tool named" "$JL_KEYCHAIN_MISSING" secret-tool
+fi
+JIRA_TOKEN="" JIRA_TOKEN_CMD="" JL_TOKEN_CACHE=""
+if [[ $OSTYPE == darwin* ]]; then
+  STUB_TOKEN="" jl_auth_line; eq "no entry fails" $? 1
+  eq "no entry state" "$JL_TOKEN_STATE" missing
+  export STUB_TOKEN=pat-123
+  jl_auth_line; eq "token from the keychain" "$REPLY" 'header = "Authorization: Bearer pat-123"'
+  unset STUB_TOKEN
+fi
+JL_TOKEN_CACHE="" JIRA_TOKEN_CMD="exit 1"
+jl_auth_line; eq "own command printed nothing" "$JL_TOKEN_ERROR" "JIRA_TOKEN_CMD printed no token"
+JL_TOKEN_CACHE="" JIRA_TOKEN_CMD=""
+
+# the Jira URL the setup guide writes
+url_cfg="$TMP/url.zsh"
+print -l '# settings' 'JIRA_BASE_URL=""' 'filter "A" "x"' > "$url_cfg"
+jl_set_base_url "$url_cfg" "https://jira.example.com/it's"
+eq "url replaced" "$(sed -n 2p "$url_cfg")" "JIRA_BASE_URL='https://jira.example.com/it'\\''s'"
+zsh -n "$url_cfg"; eq "url config parses" $? 0
+eq "url value" "$(zsh -c "source ${(q)url_cfg} 2>/dev/null; filter() {}; print -r -- \$JIRA_BASE_URL" 2>/dev/null)" "https://jira.example.com/it's"
+print -l '# no url yet' > "$url_cfg"
+jl_set_base_url "$url_cfg" "https://jira.example.com"
+eq "url added on top" "$(<$url_cfg)" "JIRA_BASE_URL='https://jira.example.com'"$'\n'"# no url yet"
+
+# transitions
+jl_parse_transitions "$ROOT/tests/fixtures/transitions.json"
+eq "transition ids" "${(j:,:)TR_ID}" "21,31,11,41"
+eq "transition targets" "${(j:,:)TR_TO}" "In Review,Done,To Do,In Progress"
+eq "transition categories" "${(j:,:)TR_CAT}" "indeterminate,done,new,indeterminate"
+eq "assignee required" "${(j:,:)TR_ASSIGN}" "1,0,0,0"
+eq "other required fields without default" "${(j:|:)TR_NEEDS}" "|Resolution||Team"
+jl_transition_body 31; eq "transition body" "$REPLY" '{"transition":{"id":"31"}}'
+jl_fields_object assignee '{"name":"j\"d"}' customfield_100 '{"id":"501"}'
+eq "fields object" "$REPLY" '{"assignee":{"name":"j\"d"},"customfield_100":{"id":"501"}}'
+jl_transition_body 21 "$REPLY"
+eq "transition body with fields" "$REPLY" '{"transition":{"id":"21"},"fields":{"assignee":{"name":"j\"d"},"customfield_100":{"id":"501"}}}'
+jl_fields_object; eq "no fields" "$REPLY" '{}'
+
+# story points
+jl_points_field "$ROOT/tests/fixtures/fields.json" auto; eq "points field found" "$REPLY" customfield_902
+jl_points_field "$ROOT/tests/fixtures/fields.json" "original Story points"; eq "points field by name" "$REPLY" customfield_901
+jl_points_field "$ROOT/tests/fixtures/fields.json" customfield_901; eq "points field by id" "$REPLY" customfield_901
+jl_points_field "$ROOT/tests/fixtures/fields.json" customfield_903; eq "text field isn't points" "$REPLY" ""
+jl_points_field "$ROOT/tests/fixtures/fields.json" off; eq "points off" "$REPLY" ""
+jq 'map(select(.id != "customfield_902"))' "$ROOT/tests/fixtures/fields.json" > "$TMP/fields.json"
+jl_points_field "$TMP/fields.json" auto; eq "planning points as fallback" "$REPLY" customfield_901
+jq '[.[] | select(.id == "customfield_903" or .id == "timespent")]' "$ROOT/tests/fixtures/fields.json" > "$TMP/fields.json"
+jl_points_field "$TMP/fields.json" auto; eq "no points field" "$REPLY" ""
+JL_POINTS_FIELD=customfield_902
+jl_parse_rows "$ROOT/tests/fixtures/search.json"
+eq "row points" "${${(@ps:$JL_US:)ROWS[1]}[12]}" 3
+eq "row without points" "${${(@ps:$JL_US:)ROWS[2]}[12]}" ""
+jl_parse_detail "$ROOT/tests/fixtures/issue.json"
+eq "detail points" "$DETAIL[points]" 5
+recs=("${DREC[@]//$JL_US/:}"); recs_matching "field:Story Points:*"
+eq "points not repeated as a field" "$REPLY" ""
+JL_POINTS_FIELD=""
+jl_parse_detail "$ROOT/tests/fixtures/issue.json"
+recs=("${DREC[@]//$JL_US/:}"); recs_matching "field:Story Points:*"
+eq "points as a plain field without the setting" "$REPLY" "field:Story Points:5"
+jl_flag_field "$ROOT/tests/fixtures/fields.json"; eq "flag field found" "$REPLY" customfield_904
+jl_flag_field "$TMP/fields.json"; eq "no flag field" "$REPLY" ""
+JL_FLAG_FIELD=customfield_904
+jl_parse_rows "$ROOT/tests/fixtures/search.json"
+eq "flagged row" "${${(@ps:$JL_US:)ROWS[1]}[13]}" 1
+eq "unflagged row" "${${(@ps:$JL_US:)ROWS[2]}[13]}" ""
+jl_parse_detail "$ROOT/tests/fixtures/issue.json"; eq "flagged detail" "$DETAIL[flagged]" 1
+JL_FLAG_FIELD=""
+jl_parse_detail "$ROOT/tests/fixtures/issue.json"; eq "flag unknown" "$DETAIL[flagged]" ""
+
+# reopened issues
+jl_reopened_jql 'project = APP ORDER BY rank' "$ROOT/tests/fixtures/statuses.json"
+eq "reopened jql" "$REPLY" '(project = APP) AND statusCategory = new AND status WAS IN ("Done", "In Progress", "Review \"2\"")'
+jl_reopened_jql 'ORDER BY updated' "$ROOT/tests/fixtures/statuses.json"
+eq "reopened jql without condition" "$REPLY" 'statusCategory = new AND status WAS IN ("Done", "In Progress", "Review \"2\"")'
+print '[]' > "$TMP/st.json"; jl_reopened_jql 'x = 1' "$TMP/st.json"; eq "no statuses" $? 1
+
+jl_points_text 1; eq "one point" "$REPLY" "1 point"
+jl_points_text 2.5; eq "points" "$REPLY" "2.5 points"
+
+# worklogs
+jl_parse_worklogs "$ROOT/tests/fixtures/worklog.json"
+eq "worklog order" "${(j:,:)WL_AUTHOR}" "Kim Dev,Ann Example"
+eq "worklog seconds" "${(j:,:)WL_SPENT}" "900,7200"
+eq "worklog comments" "${(j:|:)WL_COMMENT}" "|First pass"
+print '{"worklogs":[]}' > "$TMP/wl.json"; jl_parse_worklogs "$TMP/wl.json"; eq "no worklogs" "${#WL_AUTHOR}" 0
+jl_worklog_body " 1h   30m " "fixed it" "2026-10-28T09:15:00.000+0100"
+eq "worklog body" "$REPLY" '{"timeSpent":"1h 30m","started":"2026-10-28T09:15:00.000+0100","comment":"fixed it"}'
+jl_worklog_body "2d" "" "2026-10-28T09:15:00.000+0100"
+eq "worklog without comment" "$REPLY" '{"timeSpent":"2d","started":"2026-10-28T09:15:00.000+0100"}'
+jl_worklog_body "1.5h" ""  x; eq "decimal hours" $? 0
+jl_worklog_body "1h30m" "" x; eq "units without space" $? 0
+jl_worklog_body "90" "" x; eq "a number needs a unit" $? 1
+jl_worklog_body "1 hour" "" x; eq "words aren't units" $? 1
+
+# the fields a transition or an edit may set
+FM_ID=() FM_NAME=() FM_TYPE=() FM_ITEMS=() FM_CUSTOM=() FM_REQ=() FM_DEF=() FM_SRC=()
+jl_field_meta "$ROOT/tests/fixtures/transitions.json" 41 screen
+jl_field_meta "$ROOT/tests/fixtures/editmeta.json" "" edit
+eq "fields, screen first, issue type not settable" "${(j:,:)FM_ID}" \
+  "customfield_100,summary,fixVersions,customfield_200,labels,duedate,customfield_300,customfield_400"
+eq "field sources" "${(j:,:)FM_SRC}" "screen,edit,edit,edit,edit,edit,edit,edit"
+eq "field required" "${(j:,:)FM_REQ}" "1,1,0,1,0,0,0,0"
+eq "custom type without prefix" "$FM_CUSTOM[1]" select
+kinds=()
+for (( i = 1; i <= ${#FM_ID}; i++ )); do jl_field_kind "$FM_TYPE[i]" "$FM_ITEMS[i]" "$FM_CUSTOM[i]"; kinds+=("${REPLY:--}"); done
+eq "field kinds" "${(j:,:)kinds}" "pick,text,multi,pick,labels,date,-,user"
+jl_field_kind array user multiuserpicker; eq "several users unsupported" "$REPLY" ""
+jl_field_options "$ROOT/tests/fixtures/editmeta.json" "" fixVersions
+eq "versions: unreleased newest first, archived dropped" "${(j:,:)OPT_LABEL}" "2.0,1.2,1.0"
+eq "version ids" "${(j:,:)OPT_ID}" "13,12,10"
+eq "released noted" "${(j:,:)OPT_NOTE}" ",,released"
+jl_field_options "$ROOT/tests/fixtures/transitions.json" 41 customfield_100
+eq "screen field options" "${(j:,:)OPT_ID}:${(j:,:)OPT_LABEL}" "501,502:Mobile,Web"
+jl_field_options "$ROOT/tests/fixtures/editmeta.json" "" customfield_200
+eq "option label with a quote" "$OPT_LABEL[2]" 'Client "A"'
+jl_field_current "$ROOT/tests/fixtures/issue.json" labels; eq "current labels" "${(j:,:)CUR}" "ios,login"
+jl_field_current "$ROOT/tests/fixtures/issue.json" fixVersions; eq "no current versions" "${#CUR}" 0
+jl_field_current "$ROOT/tests/fixtures/issue.json" duedate; eq "current date" "$CUR" "2026-11-01"
+jl_field_json multi 12 13; eq "versions json" "$REPLY" '[{"id":"12"},{"id":"13"}]'
+jl_field_json pick 701; eq "option json" "$REPLY" '{"id":"701"}'
+jl_field_json labels 'ios  login'; eq "labels json" "$REPLY" '["ios","login"]'
+jl_field_json text 'say "hi"'; eq "text json" "$REPLY" '"say \"hi\""'
+jl_field_json number 2.5; eq "number json" "$REPLY" '2.5'
+jl_field_json number 2,5; eq "not a number" $? 1
+jl_field_json date 2026-11-30; eq "date json" "$REPLY" '"2026-11-30"'
+jl_field_json date 30.11.2026; eq "not a date" $? 1
+jl_fields_named "HTTP 400: fixVersions: Fix Version/s is required."; eq "named by id" "${(j:,:)FN}" fixVersions
+jl_fields_named "HTTP 400: Field fix version/s is required."; eq "named by name" "${(j:,:)FN}" fixVersions
+jl_fields_named "HTTP 400: Team and Cost Center are required"; eq "two named" "${(j:,:)FN}" "customfield_100,customfield_200"
+jl_fields_named "HTTP 400: Bitte erst die Version setzen"; eq "none named" "${#FN}" 0
+
+# requests, through a stand-in curl that answers with STUB_BODY / STUB_CODE and logs its arguments
+print -r -- '#!/bin/zsh
+cat >/dev/null
+print -r -- "$*" >> "$STUB_LOG"
+while (( $# )); do case $1 in -o) out=$2; shift ;; esac; shift; done
+[[ -n $STUB_BODY ]] && cp "$STUB_BODY" "$out"
+print -n "${STUB_CODE:-200}"' > "$TMP/bin/curl"
+chmod +x "$TMP/bin/curl"; rehash
+export STUB_LOG="$TMP/curl.log"
+JIRA_TOKEN=pat-test JL_TOKEN_CACHE=""
+STUB_BODY="$ROOT/tests/fixtures/myself-server.json" jl_me
+eq "me on server" "$JL_ME_ASSIGN" '{"name":"jdoe"}'
+eq "my display name" "$JL_ME_NAME" "Jane Doe"
+JL_ME_ASSIGN=""
+STUB_BODY="$ROOT/tests/fixtures/myself-cloud.json" jl_me
+eq "me on cloud" "$JL_ME_ASSIGN" '{"accountId":"5b10ac8d82e05b22cc7d4ef5"}'
+: > "$STUB_LOG"
+STUB_BODY="$ROOT/tests/fixtures/myself-server.json" jl_me
+eq "me asked once" "$(<$STUB_LOG)" ""
+STUB_CODE=204 STUB_BODY="" jl_request PUT /rest/api/2/issue/APP-1/assignee '{"name":"jdoe"}'
+eq "write succeeds" $? 0
+eq "write method and body" "$(tail -1 "$STUB_LOG")" \
+  "-sS -K - -X PUT --max-time 15 -H Accept: application/json -H X-Atlassian-Token: no-check -H Content-Type: application/json --data-binary {\"name\":\"jdoe\"} -D $JIRA_LIGHT_STATE_DIR/request.$$.hdr -o $JIRA_LIGHT_STATE_DIR/request.$$.body -w %{http_code} https://jira.example.com/jira/rest/api/2/issue/APP-1/assignee"
+STUB_CODE=400 STUB_BODY="$ROOT/tests/fixtures/error-400.json" jl_request POST /rest/api/2/issue/APP-1/transitions '{}'
+eq "write fails" $? 1
+eq "validator message" "$JL_REQUEST_ERROR" "HTTP 400: assignee: Assignee is required."
+eq "no files left" "$(print -l $JIRA_LIGHT_STATE_DIR/request.*(N))" ""
+jl_http_error 0 401 "$ROOT/tests/fixtures/error-400.json" /nonexistent /nonexistent
+eq "rejected token" "$REPLY" "HTTP 401: assignee: Assignee is required. — Jira didn't accept the token (JIRA_TOKEN_CMD)"
+print 'curl: (6) Could not resolve host: jira.example.com' > "$TMP/curl.err"
+jl_http_error 6 000 /nonexistent /nonexistent "$TMP/curl.err"
+eq "offline" "$REPLY" "(6) Could not resolve host: jira.example.com — VPN?"
+JIRA_TOKEN="" JL_TOKEN_CACHE=""
+path=(${path:#$TMP/bin}); rehash
 
 # a broken config reports its first error line and keeps a usable default filter
 print 'filter "Broken" $(' > "$JIRA_LIGHT_CONFIG_DIR/config.zsh"

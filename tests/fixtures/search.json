@@ -7,22 +7,52 @@
       "key": "GB-101",
       "fields": {
         "summary": "Crash on login\twith tab",
-        "status": { "name": "In Progress", "statusCategory": { "key": "indeterminate" } },
-        "issuetype": { "name": "Bug" },
-        "priority": { "name": "High" },
-        "assignee": { "displayName": "Ann Example", "name": "aexample" },
-        "updated": "2026-10-26T10:02:00.000+0100"
+        "status": {
+          "name": "In Progress",
+          "statusCategory": {
+            "key": "indeterminate"
+          }
+        },
+        "issuetype": {
+          "name": "Bug"
+        },
+        "priority": {
+          "name": "High"
+        },
+        "assignee": {
+          "displayName": "Ann Example",
+          "name": "aexample"
+        },
+        "updated": "2026-10-26T10:02:00.000+0100",
+        "timeoriginalestimate": 28800,
+        "timespent": 7200,
+        "timeestimate": 21600,
+        "customfield_902": 3,
+        "customfield_904": [
+          {
+            "value": "Impediment",
+            "id": "1"
+          }
+        ]
       }
     },
     {
       "key": "GB-99",
       "fields": {
         "summary": "Wishlist",
-        "status": { "name": "To Do", "statusCategory": { "key": "new" } },
-        "issuetype": { "name": "Story" },
+        "status": {
+          "name": "To Do",
+          "statusCategory": {
+            "key": "new"
+          }
+        },
+        "issuetype": {
+          "name": "Story"
+        },
         "priority": null,
         "assignee": null,
-        "updated": "2026-10-20T08:00:00.000+0200"
+        "updated": "2026-10-20T08:00:00.000+0200",
+        "customfield_904": null
       }
     }
   ]

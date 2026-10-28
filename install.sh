@@ -4,6 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/ChristianDeckert/herdr-jira-light/main/install.sh | sh
 #   ... | sh -s -- --yes          install without herdr's review prompt
 #   ... | sh -s -- --uninstall    remove the plugin and the key binding this script added
+#   ... | sh -s -- --token        only store (or replace) the Jira token in the keychain
 set -eu
 
 REPO=ChristianDeckert/herdr-jira-light
@@ -19,9 +20,10 @@ info() { printf '  %s\n' "$*"; }
 die() { printf 'herdr-jira-light: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  say "usage: install.sh [--yes] [--uninstall]"
+  say "usage: install.sh [--yes] [--uninstall] [--token]"
   say "  --yes        install or update without herdr's review prompt"
   say "  --uninstall  remove the plugin and the key binding this script added"
+  say "  --token      only store (or replace) the Jira token in the keychain"
 }
 
 YES=0 MODE=install
@@ -29,6 +31,7 @@ for arg in "$@"; do
   case $arg in
     -y|--yes) YES=1 ;;
     --uninstall) MODE=uninstall ;;
+    --token) MODE=token ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown option: $arg" ;;
   esac
@@ -115,6 +118,67 @@ reload_config() {
   fi
 }
 
+# --- Jira token
+# The pane reads the token from this keychain entry: the macOS Keychain, or on Linux the Secret Service
+# (GNOME Keyring, KWallet) through secret-tool. Both ask for the token themselves, so it shows neither
+# on screen nor in the shell history. The lookup's output goes to /dev/null.
+SERVICE=jira-pat
+token_cmds() {
+  if [ "$(uname -s)" = Darwin ]; then
+    TOOL=security WHERE="the Keychain"
+    LOOKUP="security find-generic-password -s $SERVICE -w"
+    STORE="security add-generic-password -U -s $SERVICE -a \"\$USER\" -w"
+  else
+    TOOL=secret-tool WHERE="your keyring"
+    LOOKUP="secret-tool lookup service $SERVICE"
+    STORE="secret-tool store --label='Jira personal access token' service $SERVICE"
+  fi
+}
+
+secret_tool_hint() {
+  if command -v apt-get >/dev/null 2>&1; then say "sudo apt-get install libsecret-tools"
+  elif command -v dnf >/dev/null 2>&1; then say "sudo dnf install libsecret"
+  elif command -v pacman >/dev/null 2>&1; then say "sudo pacman -S libsecret"
+  else say "install libsecret, which brings secret-tool"
+  fi
+}
+
+token_step() {
+  token_cmds
+  if ! command -v "$TOOL" >/dev/null 2>&1; then
+    info "$TOOL isn't installed, so the token can't be stored in $WHERE: $(secret_tool_hint)"
+    info "(or set JIRA_TOKEN_CMD in config.zsh to a command that prints the token)"
+    return 0
+  fi
+  if [ "$MODE" != token ] && sh -c "$LOOKUP" >/dev/null 2>&1; then
+    info "Jira token: found in $WHERE ($SERVICE)"
+    return 0
+  fi
+  if [ "$YES" != 1 ] && (: </dev/tty) 2>/dev/null; then
+    printf '  Store your Jira personal access token in %s now? [Y/n] ' "$WHERE"
+    answer=n
+    read -r answer </dev/tty || answer=n
+    case $answer in
+      [nN]*) ;;
+      *)
+        info "Create it in Jira (your avatar > Profile > Personal Access Tokens) and paste it at the prompt:"
+        sh -c "$STORE" </dev/tty || true
+        if sh -c "$LOOKUP" >/dev/null 2>&1; then
+          info "Jira token: stored in $WHERE ($SERVICE)"
+          return 0
+        fi
+        info "the token wasn't stored" ;;
+    esac
+  fi
+  info "Store the token later with: $STORE"
+  info "(the pane shows the same as a setup guide, where 2 does it)"
+}
+
+if [ "$MODE" = token ]; then
+  token_step
+  exit 0
+fi
+
 # --- checks
 command -v herdr >/dev/null 2>&1 ||
   die "herdr isn't installed. Install it first: curl -fsSL https://herdr.dev/install.sh | sh"
@@ -170,13 +234,14 @@ add_binding toggle "$KEY" "toggle Jira pane"
 check_config
 if [ "$ADDED" = 1 ]; then reload_config; fi
 
-CONFIG_DIR=$(herdr plugin config-dir "$ID" 2>/dev/null || echo "herdr's plugin config folder")
+# --- token
+token_step
+
 say ""
 say "Done. Next:"
-say "  1. Store your Jira token: security add-generic-password -s jira-pat -a \"\$USER\" -w"
-say "     (Linux: set JIRA_TOKEN_CMD to a command that prints it, e.g. secret-tool or pass)"
-say "  2. Set JIRA_BASE_URL and your filters in $CONFIG_DIR/config.zsh"
-say "     (the file appears when the pane opens for the first time)"
-if [ "$ADDED" = 1 ]; then say "  3. $KEY shows or hides the Jira pane in the current tab"; fi
+if [ "$ADDED" = 1 ]; then say "  $KEY opens the Jira pane in the current tab."
+else say "  Open the Jira pane with the key bound to $ID.toggle."
+fi
+say "  The pane asks for your Jira URL and guides you through the rest."
 if [ -n "$BACKUP" ]; then say "  your previous herdr config: $BACKUP"; fi
 say "  uninstall: curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --uninstall"

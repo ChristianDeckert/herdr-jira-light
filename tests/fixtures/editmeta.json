@@ -1,0 +1,138 @@
+{
+  "fields": {
+    "summary": {
+      "required": true,
+      "name": "Summary",
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "string",
+        "system": "summary"
+      }
+    },
+    "issuetype": {
+      "required": true,
+      "name": "Issue Type",
+      "operations": [],
+      "schema": {
+        "type": "issuetype"
+      },
+      "allowedValues": [
+        {
+          "id": "1",
+          "name": "Task"
+        }
+      ]
+    },
+    "fixVersions": {
+      "required": false,
+      "name": "Fix Version/s",
+      "operations": [
+        "set",
+        "add",
+        "remove"
+      ],
+      "schema": {
+        "type": "array",
+        "items": "version",
+        "system": "fixVersions"
+      },
+      "allowedValues": [
+        {
+          "id": "10",
+          "name": "1.0",
+          "released": true,
+          "archived": false
+        },
+        {
+          "id": "11",
+          "name": "1.1",
+          "released": true,
+          "archived": true
+        },
+        {
+          "id": "12",
+          "name": "1.2",
+          "released": false,
+          "archived": false
+        },
+        {
+          "id": "13",
+          "name": "2.0",
+          "released": false,
+          "archived": false
+        }
+      ]
+    },
+    "customfield_200": {
+      "required": true,
+      "name": "Cost Center",
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "option",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select"
+      },
+      "allowedValues": [
+        {
+          "id": "701",
+          "value": "Internal"
+        },
+        {
+          "id": "702",
+          "value": "Client \"A\""
+        }
+      ]
+    },
+    "labels": {
+      "required": false,
+      "name": "Labels",
+      "operations": [
+        "add",
+        "set",
+        "remove"
+      ],
+      "schema": {
+        "type": "array",
+        "items": "string",
+        "system": "labels"
+      }
+    },
+    "duedate": {
+      "required": false,
+      "name": "Due Date",
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "date",
+        "system": "duedate"
+      }
+    },
+    "customfield_300": {
+      "required": false,
+      "name": "Sprint",
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "array",
+        "items": "string",
+        "custom": "com.pyxis.greenhopper.jira:gh-sprint"
+      }
+    },
+    "customfield_400": {
+      "required": false,
+      "name": "Reviewer",
+      "operations": [
+        "set"
+      ],
+      "schema": {
+        "type": "user",
+        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:userpicker"
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+[
+  {
+    "id": "1",
+    "name": "Open",
+    "statusCategory": {
+      "key": "new"
+    }
+  },
+  {
+    "id": "2",
+    "name": "Blocked",
+    "statusCategory": {
+      "key": "new"
+    }
+  },
+  {
+    "id": "3",
+    "name": "In Progress",
+    "statusCategory": {
+      "key": "indeterminate"
+    }
+  },
+  {
+    "id": "4",
+    "name": "Review \"2\"",
+    "statusCategory": {
+      "key": "indeterminate"
+    }
+  },
+  {
+    "id": "5",
+    "name": "Done",
+    "statusCategory": {
+      "key": "done"
+    }
+  },
+  {
+    "id": "6",
+    "name": "In Progress",
+    "statusCategory": {
+      "key": "indeterminate"
+    }
+  }
+]

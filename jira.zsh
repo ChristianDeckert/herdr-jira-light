@@ -12,16 +12,18 @@ source "$ROOT/lib/update.zsh"
 LABEL="jira"
 setopt extended_glob
 
-B=$'\e[1m' D=$'\e[2m' R=$'\e[0m' RED=$'\e[31m' INV=$'\e[7m'
+B=$'\e[1m' D=$'\e[2m' R=$'\e[0m' RED=$'\e[31m' GREEN=$'\e[32m' INV=$'\e[7m'
 typeset -A CAT_SGR=(new $'\e[34m' indeterminate $'\e[33m' done $'\e[32m')
+ORANGE=$'\e[38;5;208m'
+typeset -A REOPENED
 # SGR mouse reporting on, auto-wrap off (a long line is cut instead of taking a second row) and
 # color-scheme reports on (CSI ?997;1n dark, ;2n light, sent whenever the theme changes).
 MOUSE_ON=$'\e[?1000h\e[?1006h\e[?7l\e[?2031h' MOUSE_OFF=$'\e[?1000l\e[?1006l\e[?7h\e[?2031l'
 
 APPEARANCE=dark
 apply_palette() {
-  if [[ $APPEARANCE == light ]]; then K=$'\e[38;5;128m' BAR=$'\e[48;5;254m'
-  else K=$'\e[38;5;177m' BAR=$'\e[48;5;236m'
+  if [[ $APPEARANCE == light ]]; then K=$'\e[38;5;128m' BAR=$'\e[48;5;254m' DRAFT=$'\e[38;5;67m' DRAFT_BADGE=$'\e[1;97;48;5;67m'
+  else K=$'\e[38;5;177m' BAR=$'\e[48;5;236m' DRAFT=$'\e[38;5;117m' DRAFT_BADGE=$'\e[1;30;48;5;117m'
   fi
 }
 
@@ -189,10 +191,11 @@ current_filter() {
 load_entry() { # [force]
   current_filter
   jl_sorted_jql "$FILTER_JQL" $SORT $REV; JQL=$REPLY
-  if [[ -n $JL_CONFIG_ERROR ]]; then ENTRY="" ROWS=() ERR=$JL_CONFIG_ERROR; apply_query; FP=""; return; fi
+  if [[ -n $JL_CONFIG_ERROR ]]; then ENTRY="" ROWS=() ERR=$JL_CONFIG_ERROR; apply_query; setup_check; FP=""; return; fi
   jl_search "$JQL" $1; ENTRY=$REPLY
   ENTRY_STAMP=""
   read_entry
+  reopened_fetch $1
   save_view
   FP=""
 }
@@ -209,6 +212,7 @@ read_entry() {
   [[ -f $base.json ]] && jl_parse_rows "$base.json"
   [[ -f $base.err ]] && ERR=$(<$base.err)
   [[ $ERR == "HTTP 401"* ]] && JL_TOKEN_CACHE=""
+  setup_check
   apply_query
   FP=""
 }
@@ -221,6 +225,28 @@ refresh_if_stale() {
   [[ -n $REPLY ]] && (( REPLY < JIRA_REFRESH_SECS )) && return
   m=$(zstat +mtime "$JL_STATE_DIR/cache/$ENTRY.err" 2>/dev/null) && (( EPOCHSECONDS - m < 30 )) && return
   jl_search "$JQL" >/dev/null
+  reopened_fetch
+}
+
+# REOPENED holds the keys of the list's issues that are back in a "to do" status (see jl_reopened);
+# without Jira's status list, or when that search fails, no issue is marked.
+reopened_fetch() { # [force]
+  local id=""
+  [[ -n $STATUS_FILE && -n $JQL ]] && jl_reopened "$JQL" "$STATUS_FILE" $1 && id=$REPLY
+  [[ $id == "$REOPEN_ENTRY" ]] || REOPEN_ENTRY=$id REOPEN_STAMP=""
+  read_reopened
+}
+
+read_reopened() {
+  local k f
+  if [[ -z $REOPEN_ENTRY ]]; then (( ${#REOPENED} )) && { REOPENED=() FP="" DL_SIG="" }; return; fi
+  jl_entry_stamp $REOPEN_ENTRY
+  [[ $REPLY == "$REOPEN_STAMP" ]] && return
+  [[ -n $REOPEN_STAMP ]] && JL_INFLIGHT[$REOPEN_ENTRY]=0
+  REOPEN_STAMP=$REPLY REOPENED=()
+  f="$JL_STATE_DIR/cache/$REOPEN_ENTRY.json"
+  [[ -f $f ]] && for k in ${(f)"$(jq -r '.issues[]?.key' "$f" 2>/dev/null)"}; do REOPENED[$k]=1; done
+  FP="" DL_SIG=""
 }
 
 loading() { [[ -n $ENTRY ]] && (( ${JL_INFLIGHT[$ENTRY]:-0} && EPOCHSECONDS - JL_INFLIGHT[$ENTRY] < 30 )) }
@@ -253,7 +279,8 @@ selected_issue() {
   (( ${#VISIBLE} )) || return 1
   local -a f=("${(@ps:$JL_US:)ROWS[VISIBLE[SEL]]}")
   ISSUE=(key "$f[1]" status "$f[2]" category "$f[3]" type "$f[4]" priority "$f[5]" assignee "$f[6]"
-         summary "$f[8]" url "$JIRA_BASE_URL/browse/$f[1]")
+         summary "$f[8]" url "$JIRA_BASE_URL/browse/$f[1]" estimate "$f[9]" spent "$f[10]" remaining "$f[11]"
+         points "$f[12]" flagged "$f[13]")
 }
 typeset -A ISSUE DETAIL
 typeset -a DREC DSTACK DACT
@@ -327,6 +354,7 @@ detail_act() { # action
   case $1 in
     url:*) open_url "${1#url:}" ;;
     issue:*) [[ ${1#issue:} == "$DETAIL_KEY" ]] || { DSTACK+=("$DETAIL_KEY"); show_detail "${1#issue:}" } ;;
+    worklog:) open_worklog ;;
   esac
 }
 
@@ -356,7 +384,8 @@ read_detail() {
   DETAIL=() DREC=() DETAIL_ERR=""
   if [[ -f $base.json ]] && jl_parse_detail "$base.json"; then
     ISSUE=(key "$DETAIL[key]" status "$DETAIL[status]" category "$DETAIL[category]" type "$DETAIL[type]"
-           priority "$DETAIL[priority]" summary "$DETAIL[summary]" url "$JIRA_BASE_URL/browse/$DETAIL[key]")
+           priority "$DETAIL[priority]" summary "$DETAIL[summary]" url "$JIRA_BASE_URL/browse/$DETAIL[key]"
+           estimate "$DETAIL[estimate]" spent "$DETAIL[spent]" remaining "$DETAIL[remaining]" points "$DETAIL[points]")
     ISSUE[assignee]=${${(M)DREC:#person${JL_US}Assignee${JL_US}*}##*$JL_US}
   fi
   [[ -f $base.err ]] && DETAIL_ERR=$(<$base.err)
@@ -382,6 +411,480 @@ custom_jql() {
   [[ -n ${REPLY// /} ]] || return
   CUSTOM_JQL=$REPLY CUSTOM_NAME="JQL" CUSTOM_CTX_NAME="" FIDX=0 SORT=filter REV=0 SEL=1 TOP=0
   load_entry
+}
+
+# --- workflow --------------------------------------------------------------------------------------
+# t lists the transitions Jira offers for the issue (ISSUE, from the list or the details) and runs the
+# picked one; A assigns the issue to the token's user. Jira hides transitions whose conditions fail
+# (e.g. only the assignee may run them) and reports validators only when a transition runs, so the
+# view says when the issue isn't yours and keeps a failed transition selected for another try.
+typeset -a TR_ID TR_NAME TR_TO TR_CAT TR_ASSIGN TR_NEEDS
+TR_HDR=2
+
+unassigned() { [[ -z $ISSUE[assignee] || $ISSUE[assignee] == (—|Unassigned) ]] }
+
+# Refetches the issue and the list after a change.
+after_write() { # key
+  jl_issue "$1" force
+  load_entry force
+}
+
+# The picked transition stays selected when the list comes again, so ↵ retries it.
+trans_fetch() {
+  TR_PICK=$TR_ID[TR_SEL]
+  jl_transitions "$TR_KEY"; TR_ENTRY=$REPLY
+  TR_ID=() TR_NAME=() TR_TO=() TR_CAT=() TR_ASSIGN=() TR_NEEDS=() TR_LOAD_ERR="" TR_STAMP=""
+  read_trans
+}
+
+open_trans() {
+  [[ $MODE == detail ]] || selected_issue || return
+  [[ $MODE == trans ]] || TR_BACK=$MODE
+  TR_KEY=$ISSUE[key] TR_SEL=1 TR_ERR="" TR_FN=() TR_ID=()
+  jl_me || note "can't tell who you are: $JL_REQUEST_ERROR" 1
+  # what fields asked for later need: their allowed values and the issue's current ones
+  jl_editmeta "$TR_KEY"
+  jl_issue "$TR_KEY"
+  trans_fetch
+  MODE=trans FP=""
+}
+
+read_trans() {
+  jl_entry_stamp $TR_ENTRY
+  [[ $REPLY == "$TR_STAMP" ]] && return 1
+  [[ -n $TR_STAMP ]] && JL_INFLIGHT[$TR_ENTRY]=0
+  TR_STAMP=$REPLY
+  local base="$JL_STATE_DIR/cache/$TR_ENTRY"
+  TR_LOAD_ERR=""
+  if [[ -f $base.err ]]; then TR_LOAD_ERR=$(<$base.err)
+  elif [[ -f $base.json ]]; then jl_parse_transitions "$base.json"
+  fi
+  (( ${TR_ID[(Ie)$TR_PICK]} )) && TR_SEL=${TR_ID[(Ie)$TR_PICK]}
+  (( TR_SEL > ${#TR_ID} )) && TR_SEL=${#TR_ID}
+  (( TR_SEL < 1 )) && TR_SEL=1
+  FP=""
+}
+
+trans_loading() { (( JL_INFLIGHT[$TR_ENTRY] && EPOCHSECONDS - JL_INFLIGHT[$TR_ENTRY] < 30 )) }
+
+tr_move() { # delta
+  (( ${#TR_ID} )) || return
+  TR_ERR="" TR_FN=()
+  TR_SEL=$(( TR_SEL + $1 ))
+  (( TR_SEL > ${#TR_ID} )) && TR_SEL=${#TR_ID}
+  (( TR_SEL < 1 )) && TR_SEL=1
+  FP=""
+}
+
+# A transition whose screen requires an assignee gets the user as assignee while the issue has none.
+# Field values asked for (TR_SET, field id -> JSON) go with the transition when they are on its screen;
+# the others are saved with an edit of the issue first, since Jira refuses fields a transition doesn't
+# show. Required screen fields that are still empty are asked for before the first try.
+typeset -A TR_SET
+typeset -a TR_FN ASK_Q
+
+run_transition() { # index [asked]
+  local i=$1 id k
+  local -a screen=() edit=() need=()
+  (( i >= 1 && i <= ${#TR_ID} )) || return
+  [[ -n $2 ]] || TR_SET=()
+  TR_SEL=$i TR_ERR="" TR_FN=()
+  if [[ -z $2 && -n $TR_NEEDS[i] ]]; then
+    trans_meta || { TR_ERR="can't read the fields to fill in: $REPLY"; FP=""; return }
+    jl_issue_file "$TR_KEY"; local file=$REPLY
+    for (( k = 1; k <= ${#FM_ID}; k++ )); do
+      [[ $FM_SRC[k] == screen && $FM_ID[k] != assignee ]] && (( FM_REQ[k] && ! FM_DEF[k] )) || continue
+      if [[ -f $file ]]; then jl_field_current "$file" "$FM_ID[k]"; (( ${#CUR} )) && continue; fi
+      need+=("$FM_ID[k]")
+    done
+    if (( ${#need} )); then ask_fields $need; return; fi
+  fi
+  if (( TR_ASSIGN[i] )) && unassigned; then
+    jl_me || { TR_ERR="can't tell who you are: $JL_REQUEST_ERROR"; FP=""; return }
+    screen+=(assignee "$JL_ME_ASSIGN")
+  fi
+  for id in ${(k)TR_SET}; do
+    k=${FM_ID[(Ie)$id]}
+    if [[ $FM_SRC[k] == screen ]]; then screen+=("$id" "$TR_SET[$id]"); else edit+=("$id" "$TR_SET[$id]"); fi
+  done
+  if (( ${#edit} )); then
+    note "saving the fields of $TR_KEY…"; paint
+    jl_fields_object "${edit[@]}"
+    if ! jl_request PUT "/rest/api/2/issue/$TR_KEY" "{\"fields\":$REPLY}"; then
+      TR_ERR="saving the fields failed: $JL_REQUEST_ERROR" NOTE="" FP=""
+      return
+    fi
+    jl_issue "$TR_KEY" force
+  fi
+  note "moving $TR_KEY to $TR_TO[i]…"; paint
+  jl_fields_object "${screen[@]}"
+  jl_transition_body "$TR_ID[i]" "$REPLY"
+  if jl_request POST "/rest/api/2/issue/$TR_KEY/transitions" "$REPLY"; then
+    TR_SET=() MODE=$TR_BACK
+    note "$TR_KEY → $TR_TO[i]"
+    after_write "$TR_KEY"
+  else
+    TR_ERR=$JL_REQUEST_ERROR NOTE=""
+    if trans_meta; then
+      jl_fields_named "$TR_ERR"; TR_FN=($FN)
+    else
+      TR_ERR+=" (the issue's fields can't be read: $REPLY)"
+    fi
+  fi
+  FP=""
+}
+
+# --- fields ----------------------------------------------------------------------------------------
+# FM_* for the selected transition: its screen fields, then what an edit of the issue may set.
+trans_meta() { # -> non-zero with REPLY the error
+  local ef
+  jl_editmeta "$TR_KEY" id-only; ef="$JL_STATE_DIR/cache/$REPLY.json"
+  if [[ ! -f $ef ]]; then
+    jl_request GET "/rest/api/2/issue/$TR_KEY/editmeta" || { REPLY=$JL_REQUEST_ERROR; return 1 }
+    print -r -- "$REPLY" > "$ef.tmp" && mv "$ef.tmp" "$ef"
+  fi
+  FM_ID=() FM_NAME=() FM_TYPE=() FM_ITEMS=() FM_CUSTOM=() FM_REQ=() FM_DEF=() FM_SRC=()
+  jl_field_meta "$JL_STATE_DIR/cache/$TR_ENTRY.json" "$TR_ID[TR_SEL]" screen
+  jl_field_meta "$ef" "" edit
+}
+
+field_names() { # field-id... -> REPLY "A, B"
+  local id
+  local -a n=()
+  for id; do n+=("${FM_NAME[${FM_ID[(Ie)$id]}]:-$id}"); done
+  REPLY=${(j:, :)n}
+}
+
+# Asks for each field in turn, then runs the selected transition again with the answers in TR_SET (they
+# add to earlier answers of this attempt; ↵ starts a new attempt).
+ask_fields() { # field-id...
+  ASK_Q=("$@")
+  ask_next
+}
+
+ask_next() {
+  local id k
+  while (( ${#ASK_Q} )); do
+    id=$ASK_Q[1]; ASK_Q[1]=()
+    k=${FM_ID[(Ie)$id]}
+    jl_field_kind "$FM_TYPE[k]" "$FM_ITEMS[k]" "$FM_CUSTOM[k]"
+    case $REPLY in
+      pick|multi|user) pick_value $k $REPLY; return ;;
+      text|number|date|labels) ask_typed $k $REPLY || return ;;
+      *) field_names "$id"; ask_cancel "the pane can't set $REPLY: o opens $TR_KEY in Jira"; return ;;
+    esac
+  done
+  MODE=trans
+  run_transition $TR_SEL asked
+}
+
+ask_cancel() { # [message]
+  ASK_Q=() MODE=trans FP=""
+  [[ -n $1 ]] && TR_ERR=$1
+}
+
+ask_typed() { # field-index kind; non-zero when cancelled
+  local k=$1 kind=$2 what cur="" hint
+  case $kind in
+    text) what="text" ;;
+    number) what="a number" ;;
+    date) what="a date as YYYY-MM-DD" ;;
+    labels) what="words separated by spaces" ;;
+  esac
+  hint="$what — Enter saves it, an empty line cancels"
+  jl_issue_file "$TR_KEY"
+  [[ -f $REPLY ]] && { jl_field_current "$REPLY" "$FM_ID[k]"; cur=${(j: :)CUR} }
+  while :; do
+    prompt_line "$FM_NAME[k] · $TR_KEY" "$hint" "$cur"
+    [[ -n ${REPLY//[[:space:]]/} ]] || { ask_cancel; return 1 }
+    cur=$REPLY
+    jl_field_json $kind "$cur" && break
+    hint="“$cur” isn't $what — try again, an empty line cancels"
+  done
+  TR_SET[$FM_ID[k]]=$REPLY
+}
+
+# A field with allowed values (or a user field, which offers you) is picked from a list; the values the
+# issue has are ticked, since setting the field replaces them.
+pick_value() { # field-index kind
+  local k=$1 file tid="" id
+  PK_ID=() PK_LABEL=() PK_NOTE=() PK_TICK=()
+  if [[ $2 == user ]]; then
+    jl_me || { ask_cancel "can't tell who you are: $JL_REQUEST_ERROR"; return }
+    PK_ID=("$JL_ME_ASSIGN") PK_LABEL=("you ($JL_ME_NAME)") PK_NOTE=("")
+  else
+    if [[ $FM_SRC[k] == screen ]]; then file="$JL_STATE_DIR/cache/$TR_ENTRY.json" tid=$TR_ID[TR_SEL]
+    else jl_editmeta "$TR_KEY" id-only; file="$JL_STATE_DIR/cache/$REPLY.json"
+    fi
+    jl_field_options "$file" "$tid" "$FM_ID[k]"
+    PK_ID=("${OPT_ID[@]}") PK_LABEL=("${OPT_LABEL[@]}") PK_NOTE=("${OPT_NOTE[@]}")
+  fi
+  (( ${#PK_ID} )) || { ask_cancel "Jira offers no values for $FM_NAME[k]: o opens $TR_KEY in Jira"; return }
+  if [[ $2 == multi ]]; then
+    jl_issue_file "$TR_KEY"
+    [[ -f $REPLY ]] && { jl_field_current "$REPLY" "$FM_ID[k]"; for id in $CUR; do PK_TICK[$id]=1; done }
+  fi
+  PK_TITLE="$TR_KEY · $FM_NAME[k]" PK_KIND=$2 PK_FIELD=$k PK_DONE=pick_value_done
+  pick_open
+}
+
+pick_value_done() {
+  if [[ $PK_KIND == user ]]; then REPLY=$PK_PICKED[1]; else jl_field_json $PK_KIND "${PK_PICKED[@]}"; fi
+  TR_SET[$FM_ID[PK_FIELD]]=$REPLY
+  ask_next
+}
+
+# e: any field the pane can write, then its value, then the transition again.
+choose_field() {
+  local k
+  trans_meta || { TR_ERR="can't read the issue's fields: $REPLY"; FP=""; return }
+  PK_ID=() PK_LABEL=() PK_NOTE=() PK_TICK=()
+  for (( k = 1; k <= ${#FM_ID}; k++ )); do
+    jl_field_kind "$FM_TYPE[k]" "$FM_ITEMS[k]" "$FM_CUSTOM[k]"
+    [[ -n $REPLY ]] || continue
+    PK_ID+=("$FM_ID[k]") PK_LABEL+=("$FM_NAME[k]") PK_NOTE+=("${${FM_REQ[k]:#0}:+required}")
+  done
+  PK_TITLE="$TR_KEY · set which field?" PK_KIND=field PK_DONE=choose_field_done
+  pick_open
+}
+
+choose_field_done() { ask_fields "$PK_PICKED[1]" }
+
+# --- picker --------------------------------------------------------------------------------------
+# A list to pick from, narrowed by typing. A multi-value field ticks entries with Space; Enter takes the
+# ticked ones, or the selected one when none is ticked. PK_DONE gets the ids in PK_PICKED.
+typeset -a PK_ID PK_LABEL PK_NOTE PK_VIS PK_PICKED
+typeset -A PK_TICK
+
+pick_open() {
+  PK_MULTI=0
+  [[ $PK_KIND == multi ]] && PK_MULTI=1
+  PK_Q="" PK_SEL=1 PK_TOP=0
+  pk_filter
+  MODE=pick FP=""
+}
+
+pk_filter() {
+  local i
+  PK_VIS=()
+  for (( i = 1; i <= ${#PK_ID}; i++ )); do
+    [[ -z $PK_Q ]] || words_match "$PK_Q" "$PK_LABEL[i]" || continue
+    PK_VIS+=($i)
+  done
+  (( PK_SEL > ${#PK_VIS} )) && PK_SEL=${#PK_VIS}
+  (( PK_SEL < 1 )) && PK_SEL=1
+}
+
+pk_move() { # delta
+  (( ${#PK_VIS} )) || return
+  PK_SEL=$(( PK_SEL + $1 ))
+  (( PK_SEL > ${#PK_VIS} )) && PK_SEL=${#PK_VIS}
+  (( PK_SEL < 1 )) && PK_SEL=1
+  FP=""
+}
+
+pk_toggle() {
+  (( PK_MULTI && ${#PK_VIS} )) || return
+  local id=$PK_ID[PK_VIS[PK_SEL]]
+  if (( PK_TICK[$id] )); then unset "PK_TICK[$id]"; else PK_TICK[$id]=1; fi
+  FP=""
+}
+
+pk_confirm() {
+  local i
+  PK_PICKED=()
+  if (( PK_MULTI )); then
+    for (( i = 1; i <= ${#PK_ID}; i++ )); do (( PK_TICK[$PK_ID[i]] )) && PK_PICKED+=("$PK_ID[i]"); done
+  fi
+  (( ${#PK_PICKED} || ! ${#PK_VIS} )) || PK_PICKED=("$PK_ID[PK_VIS[PK_SEL]]")
+  (( ${#PK_PICKED} )) || return
+  MODE=trans FP=""
+  $PK_DONE
+}
+
+assign_me() {
+  if [[ $MODE == list ]]; then selected_issue || return; fi
+  local key=$ISSUE[key]
+  jl_me || { note "can't tell who you are: $JL_REQUEST_ERROR" 1; return }
+  if [[ $ISSUE[assignee] == "$JL_ME_NAME" ]]; then note "$key is already assigned to you"; return; fi
+  note "assigning $key to you…"; paint
+  if jl_request PUT "/rest/api/2/issue/$key/assignee" "$JL_ME_ASSIGN"; then
+    ISSUE[assignee]=$JL_ME_NAME
+    note "$key assigned to you"
+    after_write "$key"
+    # conditions may let the assignee run more transitions
+    [[ $MODE == trans ]] && { TR_ERR=""; trans_fetch }
+  else
+    note "assigning failed: $JL_REQUEST_ERROR" 1
+  fi
+}
+
+# --- work log ------------------------------------------------------------------------------------
+# w logs time on the issue, starting now; Jira lowers the remaining estimate by it. The footer offers
+# it for issues estimated in time or in story points, the key works on any.
+estimated() {
+  if [[ $MODE == list ]]; then
+    (( ${#VISIBLE} )) || return 1
+    local -a f=("${(@ps:$JL_US:)ROWS[VISIBLE[SEL]]}")
+    (( f[9] || f[11] )) || [[ -n $f[12] ]]
+  else
+    (( DETAIL[estimate] || DETAIL[remaining] )) || [[ -n $DETAIL[points] ]]
+  fi
+}
+
+# Finds the story points (see jl_points_field) and Flagged fields once Jira's field list is cached, and
+# the status list that tells reopened issues; a change fetches the list again with them.
+fields_check() {
+  [[ -n $JIRA_BASE_URL ]] || return
+  local pts="" flag="" st="" f
+  jl_fields; f="$JL_STATE_DIR/cache/$REPLY.json"
+  if [[ -f $f ]]; then
+    jl_flag_field "$f"; flag=$REPLY
+    [[ $JIRA_POINTS_FIELD == (off|) ]] || { jl_points_field "$f" "$JIRA_POINTS_FIELD"; pts=$REPLY }
+  fi
+  [[ $JIRA_POINTS_FIELD == customfield_* ]] && pts=$JIRA_POINTS_FIELD
+  jl_statuses; [[ -f $JL_STATE_DIR/cache/$REPLY.json ]] && st="$JL_STATE_DIR/cache/$REPLY.json"
+  [[ "$pts|$flag|$st" == "$JL_POINTS_FIELD|$JL_FLAG_FIELD|$STATUS_FILE" ]] && return
+  JL_POINTS_FIELD=$pts JL_FLAG_FIELD=$flag STATUS_FILE=$st DETAIL_STAMP=""
+  (( CTX >= 0 )) && load_entry
+}
+
+time_summary() { # -> REPLY "5 points · estimated 1d · logged 2h · 6h left", empty without an estimate
+  local -a t=()
+  jl_points_text "$ISSUE[points]"; [[ -n $REPLY ]] && t+=("$REPLY")
+  (( ISSUE[estimate] )) && { jl_duration $ISSUE[estimate]; t+=("estimated $REPLY") }
+  (( ISSUE[spent] )) && { jl_duration $ISSUE[spent]; t+=("logged $REPLY") }
+  (( ISSUE[estimate] || ISSUE[remaining] )) && { jl_duration ${ISSUE[remaining]:-0}; t+=("$REPLY left") }
+  REPLY=${(j: · :)t}
+}
+
+log_work() {
+  if [[ $MODE == list ]]; then selected_issue || return; fi
+  local key=$ISSUE[key] spent="" summary started
+  local hint="like 1h 30m, 2d or 45m — Enter goes on, an empty line cancels"
+  time_summary; summary=$REPLY
+  while :; do
+    prompt_line "Log work · $key${summary:+ · $summary}" "$hint" "$spent"
+    [[ -n ${REPLY//[[:space:]]/} ]] || return
+    spent=$REPLY
+    jl_worklog_body "$spent" "" "" && break
+    hint="“$spent” isn't a time like 1h 30m — try again, an empty line cancels"
+  done
+  prompt_line "Log work · $key · $spent" "what you worked on — Enter logs it; an empty line logs without a comment" ""
+  strftime -s started '%Y-%m-%dT%H:%M:%S.000%z' $EPOCHSECONDS
+  jl_worklog_body "$spent" "$REPLY" "$started"
+  local body=$REPLY
+  spent=${${body#*\"timeSpent\":\"}%%\"*}
+  note "logging $spent on $key…"; paint
+  if jl_request POST "/rest/api/2/issue/$key/worklog" "$body"; then
+    note "logged $spent on $key"
+    after_write "$key"
+    [[ $MODE == worklog ]] && jl_worklogs "$key"
+  else
+    note "logging work failed: $JL_REQUEST_ERROR" 1
+  fi
+}
+
+# The issue's logged work, newest first; opened by tapping Logged or Progress in the details.
+open_worklog() {
+  WL_BACK=$MODE WL_KEY=$DETAIL_KEY WL_SCROLL=0 WL_STAMP="" WL_SIG="" WL_ERR=""
+  WL_STARTED=() WL_AUTHOR=() WL_SPENT=() WL_COMMENT=()
+  jl_worklogs "$WL_KEY"; WL_ENTRY=$REPLY
+  read_worklog
+  MODE=worklog FP=""
+}
+
+read_worklog() {
+  jl_entry_stamp $WL_ENTRY
+  [[ $REPLY == "$WL_STAMP" ]] && return 1
+  [[ -n $WL_STAMP ]] && JL_INFLIGHT[$WL_ENTRY]=0
+  WL_STAMP=$REPLY WL_SIG=""
+  local base="$JL_STATE_DIR/cache/$WL_ENTRY"
+  WL_ERR=""
+  [[ -f $base.json ]] && jl_parse_worklogs "$base.json"
+  [[ -f $base.err ]] && WL_ERR=$(<$base.err)
+  FP=""
+}
+
+# --- setup ---------------------------------------------------------------------------------------
+# Until the Jira URL is set and a token can be read, the list shows how to get there, and 1 and 2 do
+# the steps. SETUP_TOKEN is ok, missing, tool (the keychain tool isn't installed) or rejected (Jira
+# didn't accept the token).
+SETUP=0 SETUP_URL=0 SETUP_TOKEN=ok
+
+setup_check() {
+  local was="$SETUP $SETUP_URL $SETUP_TOKEN"
+  SETUP_URL=0 SETUP_TOKEN=ok
+  [[ -n $JIRA_BASE_URL ]] && SETUP_URL=1
+  jl_auth_line || SETUP_TOKEN=$JL_TOKEN_STATE
+  [[ $SETUP_TOKEN == ok && $ERR == *"didn't accept the token"* ]] && SETUP_TOKEN=rejected
+  if (( SETUP_URL )) && [[ $SETUP_TOKEN == ok ]]; then SETUP=0; else SETUP=1; fi
+  [[ "$SETUP $SETUP_URL $SETUP_TOKEN" == "$was" ]] || FP=""
+}
+
+setup_url() {
+  setopt local_options extended_glob
+  prompt_line "Jira URL" "The address of your Jira, with its context path such as /jira if it has one. An empty line cancels." "${JIRA_BASE_URL:-https://}"
+  local url=${${REPLY##[[:space:]]#}%%[[:space:]]#}
+  url=${url%%/##}
+  [[ -n $url && $url != http(s|):(/|) ]] || return
+  [[ $url == http(s|)://?* ]] || { note "a Jira URL starts with https:// or http://" 1; return }
+  jl_set_base_url "$JL_CONFIG" "$url" || { note "could not write $JL_CONFIG" 1; return }
+  CONFIG_STAMP=$(zstat +mtime "$JL_CONFIG" 2>/dev/null)
+  reload_config
+  note "saved the Jira URL in config.zsh"
+}
+
+# The keychain's own prompt asks for the token, so it shows neither on screen nor in a history.
+setup_token() {
+  if ! jl_keychain_cmd store; then
+    jl_secret_tool_hint
+    note "$JL_KEYCHAIN_MISSING isn't installed: $REPLY" 1
+    return
+  fi
+  run_inline "$REPLY"
+  JL_TOKEN_CACHE="" ERR=""
+  load_entry force
+  setup_check
+}
+
+draw_setup() {
+  local ok="${GREEN}✓${R}" no="${RED}✗${R}" where=keyring line
+  local -a help=()
+  [[ $OSTYPE == darwin* ]] && where=Keychain
+  VIEW+=("" " ${K}${B}Set up Jira Light${R}" "")
+  if (( SETUP_URL )); then fit " $ok ${K}${B}1${R}  Jira URL  $JIRA_BASE_URL"
+  else fit " $no ${K}${B}1${R}  Jira URL  ${D}not set; 1 asks for it${R}"
+  fi
+  VIEW+=("$REPLY")
+  case $SETUP_TOKEN in
+    ok) line=" $ok ${K}${B}2${R}  Token     found" ;;
+    missing)
+      if [[ -n $JIRA_TOKEN_CMD ]]; then
+        line=" $no ${K}${B}2${R}  Token     JIRA_TOKEN_CMD printed no token"
+        help=("Check JIRA_TOKEN_CMD in config.zsh, or remove it: then 2 stores the token in the $where.")
+      else
+        line=" $no ${K}${B}2${R}  Token     no “$JIRA_KEYCHAIN_SERVICE” entry in the $where"
+        help=("Create a personal access token in Jira: your avatar → Profile → Personal Access Tokens."
+              "2 stores it in the $where, which asks for it without showing it.")
+      fi ;;
+    tool)
+      jl_secret_tool_hint
+      line=" $no ${K}${B}2${R}  Token     $JL_KEYCHAIN_MISSING isn't installed"
+      help=("It reads the token from your keyring: $REPLY" "Or set JIRA_TOKEN_CMD in config.zsh to a command that prints the token.") ;;
+    rejected)
+      line=" $no ${K}${B}2${R}  Token     Jira didn't accept it"
+      help=("The token may have expired. Create a new one in Jira; 2 replaces the stored one.") ;;
+  esac
+  fit "$line"; VIEW+=("$REPLY")
+  for line in $help; do
+    jl_wrap $(( COLS - 8 )) "$line"
+    for line in $WRAPPED; do VIEW+=("       ${D}$line${R}"); done
+  done
+  fit "   ${K}${B}3${R}  Filters   ${D}then b browses boards and sprints, p pins them here${R}"; VIEW+=("" "$REPLY")
+  jl_wrap $(( COLS - 4 )) "Jira Cloud: set JIRA_AUTH=basic and JIRA_EMAIL in config.zsh; the token is an API token from id.atlassian.com."
+  VIEW+=("")
+  for line in $WRAPPED; do VIEW+=("  ${D}$line${R}"); done
 }
 
 # --- browser ---------------------------------------------------------------------------------------
@@ -675,13 +1178,14 @@ header_lines() {
   lr "${K}${B}${name}${R} ${D}·${R} ${B}${FILTER_NAME}${R} ${D}${pos}${R}" "${D}${REPLY}${R}"
   VIEW+=("$REPLY")
   left="${D}${DIR/#$HOME/~}${R}"
-  if [[ -n $ERR ]]; then right="${RED}${ERR}${R}"; (( ${#ROWS} )) && right="${RED}stale: ${ERR}${R}"
+  if (( SETUP )); then right="${K}setup${R}"
+  elif [[ -n $ERR ]]; then right="${RED}${ERR}${R}"; (( ${#ROWS} )) && right="${RED}stale: ${ERR}${R}"
   elif loading; then right="${K}loading…${R}"
   elif [[ -n $ENTRY ]] && jl_entry_age $ENTRY; then
     ago $REPLY
     right="${D}${#VISIBLE}${ROWS_TOTAL:+/$ROWS_TOTAL} · $REPLY${R}"
   fi
-  if [[ -n $ERR ]]; then fit "$right"; VIEW+=("$REPLY")
+  if [[ -n $ERR ]] && (( ! SETUP )); then fit "$right"; VIEW+=("$REPLY")
   else lr "$left" "$right"; VIEW+=("$REPLY")
   fi
   if (( SEARCH )) || [[ -n $QUERY ]]; then
@@ -691,9 +1195,10 @@ header_lines() {
   fi
 }
 
-# The footer is a bar of key/label pairs in columns, the most useful first, on as many rows as it needs
-# (at most three; the last pairs go when there is no room). A note takes over its first row for a few
-# seconds. FOOT_HIT holds row:first-column:last-column:key of each pair, so a click or tap presses it.
+# The footer is a bar of key/label pairs, the most useful first, that wraps onto more rows as it needs
+# (at most a third of the pane; the last pairs go when there is no room). A note takes over its first
+# row for a few seconds. FOOT_HIT holds row:first-column:last-column:key of each pair, so a click or tap
+# presses it.
 typeset -a FOOT FOOT_HIT
 FOOT_N=1
 
@@ -705,45 +1210,23 @@ bar_line() { # text -> REPLY, padded to the width on the bar background
 }
 
 hints() { # key label [key label ...]
-  local -a keys labels
-  local w=0 cols n i r c line pad len
-  while (( $# >= 2 )); do keys+=("$1") labels+=("$2"); shift 2; done
-  for (( i = 1; i <= ${#keys}; i++ )); do
-    len=$(( ${#keys[i]} + 1 + ${#labels[i]} ))
-    (( len > w )) && w=$len
+  local line=" " c=2 r=1 len max=$(( LINES / 3 ))
+  (( max < 2 )) && max=2
+  while (( $# >= 2 )); do
+    len=$(( ${#1} + 1 + ${#2} ))
+    if (( c > 2 && c + 2 + len > COLS )); then
+      (( r == max )) && break
+      bar_line "$line"; FOOT+=("$REPLY")
+      line=" " c=2
+      (( r++ ))
+    fi
+    (( c > 2 )) && { line+="  "; (( c += 2 )) }
+    line+="$K$B$1$R$BAR $2"
+    FOOT_HIT+=("$r:$c:$(( c + len - 1 )):$1")
+    (( c += len ))
+    shift 2
   done
-  (( w += 2 ))
-  # pairs that fit on one row sit side by side; columns only line up rows when there are several
-  len=0
-  for (( i = 1; i <= ${#keys}; i++ )); do (( len += ${#keys[i]} + 1 + ${#labels[i]} + 2 )); done
-  if (( len - 2 + 1 < COLS )); then
-    line=" " c=2
-    for (( i = 1; i <= ${#keys}; i++ )); do
-      (( i > 1 )) && { line+="  "; (( c += 2 )) }
-      line+="$K$B$keys[i]$R$BAR $labels[i]"
-      len=$(( ${#keys[i]} + 1 + ${#labels[i]} ))
-      FOOT_HIT+=("1:$c:$(( c + len - 1 )):$keys[i]")
-      (( c += len ))
-    done
-    bar_line "$line"; FOOT+=("$REPLY")
-    return
-  fi
-  cols=$(( COLS / w ))
-  (( cols < 1 )) && cols=1
-  n=${#keys}
-  (( n > cols * 3 )) && n=$(( cols * 3 ))
-  for (( r = 0; r * cols < n; r++ )); do
-    line=" "
-    for (( c = 0; c < cols && r * cols + c < n; c++ )); do
-      i=$(( r * cols + c + 1 ))
-      len=$(( ${#keys[i]} + 1 + ${#labels[i]} ))
-      pad=""
-      (( c < cols - 1 && i < n )) && pad=${(l:w - len:: :)}
-      line+="$K$B$keys[i]$R$BAR $labels[i]$pad"
-      FOOT_HIT+=("$(( r + 1 )):$(( 2 + c * w )):$(( 1 + (c + 1) * w )):$keys[i]")
-    done
-    bar_line "$line"; FOOT+=("$REPLY")
-  done
+  bar_line "$line"; FOOT+=("$REPLY")
 }
 
 footer_lines() {
@@ -752,15 +1235,33 @@ footer_lines() {
   else
     case $MODE in
       list)
-        if (( FIDX )); then hints "?" help "↵" details f filter s sort / search b browse m manage J jql o open
-        else hints p pin "?" help "↵" details f filter s sort / search b browse m manage o open
+        if (( SETUP )); then hints 1 "Jira URL" 2 "store token" R "check again" "?" help
+        else
+          local -a h=("?" help "↵" details t status A "assign me")
+          (( FIDX )) || h=(p pin "${h[@]}")
+          estimated && h+=(w "log work")
+          h+=(f filter s sort / search b browse m manage)
+          (( FIDX )) && h+=(J jql)
+          hints "${h[@]}" o open
         fi ;;
       browse)
         if [[ $BR_LEVEL == projects ]]; then hints "↵" open esc close
         elif (( BR_MINE )); then hints "⇥" "all issues" "↵" open "←" back esc close
         else hints "⇥" "only mine" "↵" open "←" back esc close
         fi ;;
-      detail) hints esc back "?" help "⇥" link "↵" follow o open y key Y branch a agent ;;
+      detail)
+        local -a h=(esc back "?" help t status A "assign me")
+        estimated && h+=(w "log work")
+        hints "${h[@]}" "⇥" link "↵" follow o open y key Y branch a agent ;;
+      trans)
+        local -a h=(1-9 pick "↵" move)
+        (( ${#TR_FN} )) && h+=(f "fill fields")
+        hints "${h[@]}" e "set a field" A "assign me" o open esc back ;;
+      worklog) hints esc back "↑↓" scroll w "log work" r refresh ;;
+      pick)
+        if (( PK_MULTI )); then hints "␣" tick "↵" done esc cancel
+        else hints "↵" choose esc cancel
+        fi ;;
       manage)
         if (( MG_CONFIRM )); then hints y "remove “$PIN_NAME[MG_ORDER[MG_SEL]]”" n keep
         else hints d remove esc back "?" help
@@ -794,6 +1295,7 @@ press() { # hint key
     ←) escape '[D' ;;
     ↵) key_press $'\r' ;;
     ⇥) key_press $'\t' ;;
+    ␣) key_press ' ' ;;
     ↑↓|1-9) ;;
     *) key_press "$1" ;;
   esac
@@ -802,19 +1304,22 @@ press() { # hint key
 
 row_line() { # rows-index selected(0|1) key-width
   local -a f=("${(@ps:$JL_US:)ROWS[$1]}")
-  local cat=${CAT_SGR[$f[3]]:-$D} key=${(r:$3:)f[1]} mid="" plain
+  local cat key=${(r:$3:)f[1]} mid="" plain flag=""
+  status_sgr "$f[2]" "$f[3]" "$f[1]"; cat=$REPLY
   jl_age "$f[7]"; local age=${(l:3:)REPLY}
   local st=${(r:12:)f[2]} who=${(r:14:)f[6]}
   if (( $2 )); then
     plain="▸ ● $key $age"
     (( COLS >= 80 )) && plain+="  $st"
     (( COLS >= 110 )) && plain+="  $who"
-    fit "${INV}${plain}  $f[8]${(l:COLS:: :)}"
+    [[ -n $f[13] ]] && flag="⚑ "
+    fit "${INV}${plain}  $flag$f[8]${(l:COLS:: :)}"
     REPLY="${REPLY%$R}$R"
   else
     (( COLS >= 80 )) && mid+="  ${cat}${st}${R}"
     (( COLS >= 110 )) && mid+="  ${D}${who}${R}"
-    fit "  ${cat}●${R} ${B}${key}${R} ${D}${age}${R}${mid}  $f[8]"
+    [[ -n $f[13] ]] && flag="${RED}⚑${R} "
+    fit "  ${cat}●${R} ${B}${key}${R} ${D}${age}${R}${mid}  $flag$f[8]"
   fi
 }
 
@@ -828,6 +1333,7 @@ draw_list() {
   (( SEL <= TOP )) && TOP=$(( SEL - 1 ))
   (( SEL > TOP + LH )) && TOP=$(( SEL - LH ))
   (( TOP < 0 )) && TOP=0
+  if (( SETUP )); then draw_setup; return; fi
   if (( ! ${#VISIBLE} )); then
     if [[ -n $ERR ]]; then
       jl_wrap $(( COLS - 4 )) "$ERR"
@@ -847,10 +1353,39 @@ draw_list() {
 # Status as a badge colored by its category, priority and type by their usual meaning.
 typeset -A CAT_BADGE=(new $'\e[1;97;44m' indeterminate $'\e[1;30;43m' done $'\e[1;30;42m')
 
-NO_CAT_BADGE=$'\e[1;30;47m'
-status_badge() { # name category -> REPLY
+NO_CAT_BADGE=$'\e[1;30;47m' BLOCKED_BADGE=$'\e[1;97;41m' ORANGE_BADGE=$'\e[1;30;48;5;208m'
+
+# Beyond the category's color: a blocked status is red, an issue back in a "to do" status (REOPENED,
+# by key) orange, and drafts and the backlog a lighter blue than the other "to do" statuses.
+status_kind() { # name category [key] -> REPLY blocked | reopened | draft | the category
+  if [[ $1 == (#i)*(block|impediment)* ]]; then REPLY=blocked
+  elif [[ $2 == new && -n $3 && -n $REOPENED[$3] ]]; then REPLY=reopened
+  elif [[ $2 == new && $1 == (#i)(draft|backlog) ]]; then REPLY=draft
+  else REPLY=$2
+  fi
+}
+
+status_sgr() { # name category [key] -> REPLY
+  status_kind "$@"
+  case $REPLY in
+    blocked) REPLY=$RED ;;
+    reopened) REPLY=$ORANGE ;;
+    draft) REPLY=$DRAFT ;;
+    *) REPLY=${CAT_SGR[$REPLY]:-$D} ;;
+  esac
+}
+
+status_badge() { # name category [key] -> REPLY
   [[ -n $1 ]] || { REPLY=""; return }
-  REPLY="${CAT_BADGE[$2]:-$NO_CAT_BADGE} $1 $R"
+  local name=$1
+  status_kind "$@"
+  case $REPLY in
+    blocked) REPLY=$BLOCKED_BADGE ;;
+    reopened) REPLY=$ORANGE_BADGE ;;
+    draft) REPLY=$DRAFT_BADGE ;;
+    *) REPLY=${CAT_BADGE[$REPLY]:-$NO_CAT_BADGE} ;;
+  esac
+  REPLY="$REPLY $name $R"
 }
 
 priority_text() { # name -> REPLY
@@ -944,7 +1479,9 @@ detail_lines() {
   if (( ! ${#DETAIL} )); then dl ""; dl " ${D}loading…${R}"; return; fi
 
   dsection Details
-  status_badge "$DETAIL[status]" "$DETAIL[category]"; dkv Status "$REPLY"
+  status_badge "$DETAIL[status]" "$DETAIL[category]" "$DETAIL_KEY"; dkv Status "$REPLY"
+  [[ -n $REOPENED[$DETAIL_KEY] && $DETAIL[category] == new ]] && dkv "" "${D}back in a “to do” status after it was further along${R}"
+  (( DETAIL[flagged] )) && dkv Flagged "${RED}⚑${R} yes"
   dkv Resolution "${DETAIL[resolution]:-${D}Unresolved${R}}"
   [[ -n $DETAIL[priority] ]] && { priority_text "$DETAIL[priority]"; dkv Priority "$REPLY" }
   type_text "$DETAIL[type]"; dkv Type "$REPLY"
@@ -967,12 +1504,16 @@ detail_lines() {
   [[ -n $DETAIL[due] ]] && { ddate "$DETAIL[due]"; dkv Due "$REPLY" }
   [[ -n $DETAIL[resolved] ]] && { ddate "$DETAIL[resolved]"; dkv Resolved "$REPLY" }
 
-  if (( DETAIL[estimate] || DETAIL[spent] || DETAIL[remaining] )); then
-    dsection "Time tracking"
+  # Logged and Progress open the work log
+  if (( DETAIL[estimate] || DETAIL[spent] || DETAIL[remaining] )) || [[ -n $DETAIL[points] ]]; then
+    local wl="" wls=""
+    (( DETAIL[spent] )) && wl="worklog:" wls="$K$JL_UL"
+    if (( DETAIL[estimate] || DETAIL[spent] || DETAIL[remaining] )); then dsection "Time tracking"; else dsection Estimate; fi
+    [[ -n $DETAIL[points] ]] && { jl_points_text "$DETAIL[points]"; dkv "Story points" "$REPLY" }
     (( DETAIL[estimate] )) && { jl_duration $DETAIL[estimate]; dkv Estimated "$REPLY" }
-    jl_duration $DETAIL[spent]; dkv Logged "$REPLY"
-    jl_duration $DETAIL[remaining]; dkv Remaining "$REPLY"
-    time_bar $DETAIL[estimate] $DETAIL[spent] $DETAIL[remaining]; [[ -n $REPLY ]] && dkv Progress "$REPLY"
+    jl_duration $DETAIL[spent]; dkv Logged "$REPLY" "$wl" "$wls"
+    (( DETAIL[estimate] || DETAIL[remaining] )) && { jl_duration $DETAIL[remaining]; dkv Remaining "$REPLY" }
+    time_bar $DETAIL[estimate] $DETAIL[spent] $DETAIL[remaining]; [[ -n $REPLY ]] && dkv Progress "$REPLY" "$wl"
   fi
 
   dsection Description
@@ -988,7 +1529,8 @@ detail_lines() {
     dsection Sub-tasks $n
     for r in ${(M)DREC:#sub$JL_US*}; do
       f=("${(@ps:$JL_US:)r}")
-      dl "  ${CAT_SGR[$f[4]]:-$D}●$R $K$JL_UL$f[2]$R ${D}${f[3]}${R}  $f[5]" "issue:$f[2]"
+      status_sgr "$f[3]" "$f[4]" "$f[2]"
+      dl "  $REPLY●$R $K$JL_UL$f[2]$R ${D}${f[3]}${R}  $f[5]" "issue:$f[2]"
     done
   fi
   n=${#${(M)DREC:#link$JL_US*}}
@@ -996,7 +1538,8 @@ detail_lines() {
     dsection Links $n
     for r in ${(M)DREC:#link$JL_US*}; do
       f=("${(@ps:$JL_US:)r}")
-      dl "  ${D}${f[2]}${R} ${CAT_SGR[$f[5]]:-$D}●$R $K$JL_UL$f[3]$R  $f[6]" "issue:$f[3]"
+      status_sgr "$f[4]" "$f[5]" "$f[3]"
+      dl "  ${D}${f[2]}${R} $REPLY●$R $K$JL_UL$f[3]$R  $f[6]" "issue:$f[3]"
     done
   fi
   n=${#${(M)DREC:#att$JL_US*}}
@@ -1026,7 +1569,8 @@ detail_lines() {
 draw_detail() {
   local left back=""
   type_text "${DETAIL[type]:-$ISSUE[type]}"; left="$K$B$DETAIL_KEY$R  $REPLY"
-  status_badge "${DETAIL[status]:-$ISSUE[status]}" "${DETAIL[category]:-$ISSUE[category]}"; left+="  $REPLY"
+  status_badge "${DETAIL[status]:-$ISSUE[status]}" "${DETAIL[category]:-$ISSUE[category]}" "$DETAIL_KEY"; left+="  $REPLY"
+  (( ${DETAIL[flagged]:-$ISSUE[flagged]} )) && left+="  ${RED}⚑${R}"
   [[ -n ${DETAIL[priority]:-$ISSUE[priority]} ]] && { priority_text "${DETAIL[priority]:-$ISSUE[priority]}"; left+="  $REPLY" }
   (( ${#DSTACK} )) && back="${D}← $DSTACK[-1]${R}"
   lr "$left" "$back"
@@ -1069,16 +1613,41 @@ draw_help() {
     "r  R" "fetch again / reload config, check for updates"
     "u" "update the plugin, when the bar offers it"
     "o" "open the issue in the browser"
+    "t" "change the status (workflow)"
+    "A" "assign the issue to you"
+    "w" "log work (lowers the remaining estimate)"
     "y  Y" "copy key / branch name"
     "a" "send the issue to an agent"
     "q" "close the pane"
+    "" "Setup (shows until Jira answers)"
+    "1" "set the Jira URL"
+    "2" "store the token in the keychain"
     "" "Details"
     "↑↓ j k ␣" "scroll (mouse wheel too)"
     "⇥  ⇧⇥" "next / previous link"
     "↵ click" "follow the link"
     "esc ← h q" "back"
     "o y Y a" "open, copy key / branch, send to agent"
+    "t  A  w" "change the status / assign to you / log work"
+    "Logged" "tap it (or Progress) for the work log"
     "r" "fetch the issue again"
+    "" "Status (t)"
+    "1–9 ↵" "move the issue there"
+    "assigns you" "Jira needs an assignee; you become it"
+    "A" "assign to you; Jira may then offer more"
+    "asks for …" "a required field, asked for before the move"
+    "error" "a rule Jira checks on the move; ↵ retries"
+    "f" "fill the fields the error names, try again"
+    "e" "set any field of the issue, then try again"
+    "" "Work log (Logged in the details)"
+    "↑↓ j k ␣" "scroll"
+    "w  r" "log work / fetch again"
+    "esc ← q" "back"
+    "" "Picking a value"
+    "type" "narrow the list"
+    "␣" "tick (fields with several values)"
+    "↵" "take the ticked or the selected one"
+    "esc" "clear the typing, then cancel"
     "" "Browser (b)"
     "type" "narrow the list"
     "↵ → click" "open"
@@ -1089,6 +1658,12 @@ draw_help() {
     "↑↓ j k" "move"
     "d ⌫ del" "remove, after y to confirm"
     "esc ← q" "back"
+    "" "Colors"
+    "●" "status: blue to do, yellow in progress, green done"
+    "red" "blocked"
+    "orange" "back in to do after it was further along"
+    "light blue" "draft or backlog"
+    "⚑" "flagged"
     "" "Footer"
     "tap" "a key in the bar presses it")
   local i
@@ -1184,6 +1759,116 @@ draw_agents() {
   done
 }
 
+# WLINES for the work log, rebuilt when it, the width or the theme changes.
+draw_worklog() {
+  local i v total=0 sig="$WL_STAMP|$COLS|$APPEARANCE"
+  for i in $WL_SPENT; do (( total += i )); done
+  jl_duration $total
+  lr "${K}${B}${WL_KEY}${R} ${D}·${R} ${B}Work log${R}" "${D}${#WL_SPENT} entries · $REPLY${R}"
+  VIEW+=("$REPLY")
+  if [[ $sig != "$WL_SIG" ]]; then
+    WL_SIG=$sig WLINES=()
+    if [[ -n $WL_ERR ]]; then
+      jl_wrap $(( COLS - 3 )) "$WL_ERR"
+      for v in $WRAPPED; do WLINES+=(" ${RED}$v${R}"); done
+    elif (( ! ${#WL_SPENT} )); then
+      [[ -f $JL_STATE_DIR/cache/$WL_ENTRY.json ]] && WLINES+=(" ${D}nothing logged yet — w logs work${R}") || WLINES+=(" ${D}loading…${R}")
+    fi
+    for (( i = 1; i <= ${#WL_SPENT}; i++ )); do
+      jl_duration $WL_SPENT[i]; v=$REPLY
+      ddate "$WL_STARTED[i]"
+      WLINES+=("" " $K●$R $B$v$R  $WL_AUTHOR[i] ${D}·${R} $REPLY")
+      if [[ -n ${WL_COMMENT[i]//[[:space:]]/} ]]; then
+        MARKUP=(); jl_markup $(( COLS - 7 )) "$WL_COMMENT[i]"
+        for v in $MARKUP; do WLINES+=("    $v"); done
+      fi
+    done
+  fi
+  LH=$(( LINES - 1 - FOOT_N ))
+  (( WL_SCROLL > ${#WLINES} - LH )) && WL_SCROLL=$(( ${#WLINES} - LH ))
+  (( WL_SCROLL < 0 )) && WL_SCROLL=0
+  for (( i = WL_SCROLL + 1; i <= ${#WLINES} && i <= WL_SCROLL + LH; i++ )); do fit "$WLINES[i]"; VIEW+=("$REPLY"); done
+}
+
+draw_pick() {
+  local i j n=${#PK_VIS} line box
+  lr "${K}${B}${PK_TITLE}${R}" "${D}${n}/${#PK_ID}${R}"
+  VIEW+=("$REPLY")
+  fit "${K}>${R} ${PK_Q}█"
+  VIEW+=("$REPLY")
+  HDR=2
+  LH=$(( LINES - HDR - FOOT_N ))
+  (( LH < 1 )) && LH=1
+  (( PK_SEL <= PK_TOP )) && PK_TOP=$(( PK_SEL - 1 ))
+  (( PK_SEL > PK_TOP + LH )) && PK_TOP=$(( PK_SEL - LH ))
+  (( PK_TOP < 0 )) && PK_TOP=0
+  (( n )) || VIEW+=("  ${D}nothing matches${R}")
+  for (( i = PK_TOP + 1; i <= n && i <= PK_TOP + LH; i++ )); do
+    j=$PK_VIS[i] box=""
+    (( PK_MULTI )) && { (( PK_TICK[$PK_ID[j]] )) && box="[x] " || box="[ ] " }
+    line="$box$PK_LABEL[j]${PK_NOTE[j]:+  ${D}$PK_NOTE[j]${R}}"
+    if (( i == PK_SEL )); then
+      fit "${INV}▸ ${(S)line//$'\e'\[[0-9;]#m/}${(l:COLS:: :)}"
+      REPLY="${REPLY%$R}$R"
+    else
+      fit "  $line"
+    fi
+    VIEW+=("$REPLY")
+  done
+}
+
+draw_trans() {
+  local i n=${#TR_ID} w=4 tw=4 num tag line who
+  unassigned && who="${D}Unassigned${R}" || who="${D}${ISSUE[assignee]}${R}"
+  status_badge "$ISSUE[status]" "$ISSUE[category]" "$TR_KEY"
+  lr "${K}${B}${TR_KEY}${R}  $REPLY ${D}→ which status?${R}" "$who"
+  VIEW+=("$REPLY" "")
+  for i in $TR_NAME; do (( ${#i} > w )) && w=${#i}; done
+  for i in $TR_TO; do (( ${#i} > tw )) && tw=${#i}; done
+  if (( ! n )); then
+    if [[ -n $TR_LOAD_ERR ]]; then
+      jl_wrap $(( COLS - 4 )) "$TR_LOAD_ERR"
+      for i in $WRAPPED; do VIEW+=("  ${RED}$i${R}"); done
+    elif trans_loading; then VIEW+=("  ${D}loading…${R}")
+    else VIEW+=("  ${D}Jira offers no transition to you here${R}")
+    fi
+  fi
+  for (( i = 1; i <= n; i++ )); do
+    num=" "; (( i <= 9 )) && num=$i
+    tag=""
+    (( TR_ASSIGN[i] )) && unassigned && tag+="  ${K}assigns you${R}"
+    [[ -n $TR_NEEDS[i] ]] && tag+="  ${K}asks for $TR_NEEDS[i]${R}"
+    status_sgr "$TR_TO[i]" "$TR_CAT[i]"
+    line="${(r:w:)TR_NAME[i]}  → $REPLY●${R} ${(r:tw:)TR_TO[i]}$tag"
+    if (( i == TR_SEL )); then
+      fit "${INV}▸ $num  ${(S)line//$'\e'\[[0-9;]#m/}${(l:COLS:: :)}"
+      REPLY="${REPLY%$R}$R"
+    else
+      fit "  ${K}$num${R}  $line"
+    fi
+    VIEW+=("$REPLY")
+  done
+  local -a notes=()
+  if [[ -n $TR_ERR ]]; then
+    VIEW+=("")
+    jl_wrap $(( COLS - 3 )) "$TR_ERR"
+    for i in $WRAPPED; do VIEW+=(" ${RED}$i${R}"); done
+    if (( ${#TR_FN} )); then field_names $TR_FN; notes+=("f sets $REPLY, then tries again.")
+    else notes+=("e sets a field of the issue, then tries again.")
+    fi
+    unassigned && notes+=("A assigns it to you, then ↵ tries again.")
+  elif unassigned; then
+    notes+=("Jira lists only the transitions you may run; a status that needs an assignee may appear once you take the issue: A assigns it to you.")
+  elif [[ $ISSUE[assignee] != "$JL_ME_NAME" ]]; then
+    notes+=("Jira may hold back transitions only the assignee can run: A assigns it to you.")
+  fi
+  for line in $notes; do
+    VIEW+=("")
+    jl_wrap $(( COLS - 3 )) "$line"
+    for i in $WRAPPED; do VIEW+=(" ${D}$i${R}"); done
+  done
+}
+
 paint() {
   VIEW=()
   footer_lines
@@ -1192,6 +1877,9 @@ paint() {
     detail) draw_detail ;;
     help) draw_help ;;
     agents) draw_agents ;;
+    trans) draw_trans ;;
+    pick) draw_pick ;;
+    worklog) draw_worklog ;;
     browse) draw_browse ;;
     manage) draw_manage ;;
   esac
@@ -1228,6 +1916,17 @@ click() { # row column
       local i=$(( MG_TOP + $1 - HDR ))
       (( $1 > HDR && i >= 1 && i <= ${#MG_MAP} && MG_MAP[i] )) || return
       MG_SEL=$MG_MAP[i] MG_CONFIRM=0 FP="" ;;
+    trans)
+      local i=$(( $1 - TR_HDR ))
+      (( i >= 1 && i <= ${#TR_ID} )) || return
+      if (( i == TR_SEL )); then run_transition $i; else TR_SEL=$i FP=""; fi ;;
+    pick)
+      local i=$(( PK_TOP + $1 - HDR ))
+      (( $1 > HDR && i >= 1 && i <= ${#PK_VIS} )) || return
+      if (( i != PK_SEL )); then PK_SEL=$i FP=""
+      elif (( PK_MULTI )); then pk_toggle
+      else pk_confirm
+      fi ;;
     help) MODE=$HELP_BACK FP="" ;;
   esac
 }
@@ -1237,12 +1936,21 @@ scroll() { # delta
     list) move $1 ;;
     browse) br_move $1 ;;
     manage) mg_move $1 ;;
+    trans) tr_move $1 ;;
+    pick) pk_move $1 ;;
+    worklog) WL_SCROLL=$(( WL_SCROLL + $1 )); FP="" ;;
     help) HSCROLL=$(( HSCROLL + $1 )); FP="" ;;
     detail) DSCROLL=$(( DSCROLL + $1 )); FP="" ;;
   esac
 }
 
 key_list() { # key
+  if (( SETUP )); then
+    case $1 in
+      1) setup_url; return ;;
+      2) setup_token; return ;;
+    esac
+  fi
   case $1 in
     j) move 1 ;;
     k) move -1 ;;
@@ -1260,6 +1968,9 @@ key_list() { # key
     R) reload_config; update_check force ;;
     u) update_available && update_now ;;
     o) selected_issue && open_url "$ISSUE[url]" ;;
+    t) open_trans ;;
+    A) assign_me ;;
+    w) log_work ;;
     y) selected_issue && copy "$ISSUE[key]" key ;;
     Y) selected_issue && { jl_fill "$JIRA_BRANCH_TEMPLATE" ISSUE; copy "$REPLY" branch } ;;
     a) pick_agent ;;
@@ -1283,6 +1994,9 @@ key_detail() {
     y) copy "$ISSUE[key]" key ;;
     Y) jl_fill "$JIRA_BRANCH_TEMPLATE" ISSUE; copy "$REPLY" branch ;;
     a) pick_agent ;;
+    t) open_trans ;;
+    A) assign_me ;;
+    w) log_work ;;
     r) jl_issue "$DETAIL_KEY" force; note "fetching…" ;;
     \?) show_help ;;
   esac
@@ -1310,6 +2024,9 @@ key_press() { # key
   else
     case $MODE in
       list) key_list "$1" ;;
+      trans) key_trans "$1" ;;
+      pick) key_pick "$1" ;;
+      worklog) key_worklog "$1" ;;
       browse) key_browse "$1" ;;
       detail) key_detail "$1" ;;
       manage) key_manage "$1" ;;
@@ -1325,6 +2042,48 @@ key_press() { # key
         fi ;;
     esac
   fi
+}
+
+key_trans() {
+  case $1 in
+    [1-9]) run_transition $1 ;;
+    j) tr_move 1 ;;
+    k) tr_move -1 ;;
+    $'\n'|$'\r') run_transition $TR_SEL ;;
+    A) assign_me ;;
+    f) (( ${#TR_FN} )) && ask_fields $TR_FN ;;
+    e) choose_field ;;
+    o) open_url "$ISSUE[url]" ;;
+    q|h) MODE=$TR_BACK FP="" ;;
+    \?) show_help ;;
+  esac
+}
+
+key_worklog() {
+  case $1 in
+    j) scroll 1 ;;
+    k) scroll -1 ;;
+    ' ') scroll $(( LH - 1 )) ;;
+    w) log_work ;;
+    r) jl_worklogs "$WL_KEY"; note "fetching…" ;;
+    q|h) MODE=$WL_BACK FP="" ;;
+    \?) show_help ;;
+  esac
+}
+
+# Letters narrow the list, so the picker is driven by arrows, Space, Enter and Esc.
+key_pick() {
+  case $1 in
+    $'\x7f'|$'\b') PK_Q=${PK_Q[1,-2]} ;;
+    $'\x15') PK_Q="" ;;
+    $'\n'|$'\r') pk_confirm; return ;;
+    ' ') if (( PK_MULTI )); then pk_toggle; return; fi; PK_Q+=' ' ;;
+    [[:print:]]) PK_Q+=$1 ;;
+    *) return ;;
+  esac
+  PK_SEL=1 PK_TOP=0
+  pk_filter
+  FP=""
 }
 
 key_manage() {
@@ -1360,6 +2119,10 @@ escape() { # sequence after ESC
       if (( SEARCH )); then SEARCH=0 QUERY=""; apply_query
       elif [[ $MODE == list && -n $QUERY ]]; then QUERY=""; apply_query
       elif [[ $MODE == agents ]]; then MODE=$MODE_BACK
+      elif [[ $MODE == trans ]]; then MODE=$TR_BACK
+      elif [[ $MODE == pick && -n $PK_Q ]]; then PK_Q=""; pk_filter
+      elif [[ $MODE == pick ]]; then ask_cancel
+      elif [[ $MODE == worklog ]]; then MODE=$WL_BACK
       elif [[ $MODE == browse && -n $BR_Q ]]; then BR_Q=""; br_filter
       elif [[ $MODE == detail ]]; then detail_back
       elif [[ $MODE == help ]]; then MODE=$HELP_BACK
@@ -1370,7 +2133,7 @@ escape() { # sequence after ESC
     [[O]A) scroll -1 ;;
     [[O]B) scroll 1 ;;
     [[O]C) case $MODE in list) open_detail ;; browse) br_open ;; esac ;;
-    [[O]D) case $MODE in browse) br_up ;; detail) detail_back ;; help) MODE=$HELP_BACK FP="" ;; *) MODE=list FP="" ;; esac ;;
+    [[O]D) case $MODE in browse) br_up ;; detail) detail_back ;; help) MODE=$HELP_BACK FP="" ;; trans) MODE=$TR_BACK FP="" ;; pick) ask_cancel ;; worklog) MODE=$WL_BACK FP="" ;; *) MODE=list FP="" ;; esac ;;
     '[Z') [[ $MODE == detail ]] && detail_link -1 ;;
     '[3~') [[ $MODE == manage ]] && key_manage d ;;
     '[5~') scroll $(( -LH + 1 )) ;;
@@ -1448,7 +2211,7 @@ trap 'FP= NEED_POLL=1' WINCH
 query_theme
 MODE=list DIR="" LAST_FOCUSED="" FP="" CTX=-1 FIDX=1 SORT=filter REV=0 SEL=1 TOP=0 HDR=2 LH=1
 SEARCH=0 QUERY="" NOTE="" NOTE_UNTIL=0 NOTE_ERR=0 ENTRY="" ENTRY_STAMP="" ERR=""
-typeset -a ROWS VISIBLE VIEW DLINES AGENTS TAB_AGENTS WS_AGENTS JL_FILTERS
+typeset -a ROWS VISIBLE VIEW DLINES WLINES AGENTS TAB_AGENTS WS_AGENTS JL_FILTERS
 CONFIG_STAMP=$(zstat +mtime "$JL_CONFIG" 2>/dev/null)
 code_stamp; CODE_STAMP=$REPLY
 ROOT_STAMP=$(zstat +mtime "$ROOT_FILE" 2>/dev/null) UPDATE_STAMP=""
@@ -1463,6 +2226,7 @@ while :; do
   if (( NEED_POLL || EPOCHREALTIME - LAST_POLL >= POLL_EVERY )); then
     read -r LINES COLS < <(stty size </dev/tty 2>/dev/null || print "40 60")
     locate
+    fields_check
     jl_match_context "$DIR"
     if (( REPLY != CTX )); then switch_context $REPLY; MODE=list; fi
     if [[ $(zstat +mtime "$JL_CONFIG" 2>/dev/null) != "$CONFIG_STAMP" ]]; then
@@ -1477,7 +2241,10 @@ while :; do
     LAST_POLL=$EPOCHREALTIME NEED_POLL=0
   fi
   read_entry
+  read_reopened
   [[ $MODE == detail ]] && read_detail
+  [[ $MODE == trans ]] && read_trans
+  [[ $MODE == worklog ]] && read_worklog
   [[ $MODE == browse ]] && br_read
   # the minute keeps "updated 3m ago" current; NOTE_UNTIL clears a note when it expires
   fp="$MODE|$LINES|$COLS|$APPEARANCE|$(( EPOCHSECONDS / 60 ))|$(( EPOCHSECONDS < NOTE_UNTIL ))|${JL_INFLIGHT[${ENTRY:-none}]}"

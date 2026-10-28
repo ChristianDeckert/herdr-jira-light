@@ -1,0 +1,26 @@
+{
+  "startAt": 0,
+  "maxResults": 2,
+  "total": 2,
+  "worklogs": [
+    {
+      "author": {
+        "name": "ann",
+        "displayName": "Ann Example"
+      },
+      "comment": "First pass",
+      "started": "2026-10-26T09:00:00.000+0100",
+      "timeSpent": "2h",
+      "timeSpentSeconds": 7200
+    },
+    {
+      "author": {
+        "name": "kim",
+        "displayName": "Kim Dev"
+      },
+      "started": "2026-10-27T14:30:00.000+0100",
+      "timeSpent": "15m",
+      "timeSpentSeconds": 900
+    }
+  ]
+}
